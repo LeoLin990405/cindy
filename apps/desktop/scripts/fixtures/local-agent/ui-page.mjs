@@ -78,6 +78,8 @@ export default {
     await ui.capture('permissions');
     await page.getByText(list[0].clientId, { exact: false }).waitFor();
     const toggles = page.getByRole('switch', { name: await ui.t('localAgent.createVisibleSessions'), exact: true });
+    const executable = list.filter(connection => !connection.permissions?.length || connection.permissions.includes('agent:execute'));
+    if (await toggles.count() !== executable.length) throw new Error('Read-only grant exposes an execution-only preference');
     if (await toggles.nth(0).isChecked() !== Boolean(list[0].createVisibleSessions)) throw new Error('Wrong initial visibility');
     await toggles.nth(0).click();
     if (ui.data.saveFailed) {
@@ -88,7 +90,7 @@ export default {
         id: `local-agent-visible-${list[0].id}`, checked: !Boolean(list[0].createVisibleSessions),
       });
     }
-    if (await toggles.nth(1).isChecked()) throw new Error('Changed another application');
+    if (await toggles.count() > 1 && await toggles.nth(1).isChecked()) throw new Error('Changed another application');
     await page.getByRole('button', { name: await ui.t('localAgent.revokeConnection', { app: list[0].name }), exact: true }).click();
     if (ui.data.cancel || ui.data.revokeFailed) await page.getByText(list[0].clientId, { exact: false }).waitFor();
     else await page.getByText(list[0].clientId, { exact: false }).waitFor({ state: 'detached' });

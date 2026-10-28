@@ -186,6 +186,8 @@ describe('local application authorization and lifecycle', () => {
     const execute = await f.connect({ id: 'org.example.app', name: 'Notes' });
     const paired = await f.pair({ id: 'org.example.app', name: 'Notes' }, ['tasks:read']);
     const observe = paired.response.result.token;
+    // The owner's new visibility preference does not upgrade an observation-only grant.
+    expect(await f.server().setCreateVisibleSessions(f.server().connections()[1].id, true)).toBe(true);
     expect(paired.response.result.permissions).toEqual(['tasks:read']);
     expect(approve.mock.calls.map((args: any[]) => args[2])).toEqual([['agent:execute'], ['tasks:read']]);
     expect((await f.rpc('observation/devices', {}, execute)).error.code).toBe('PERMISSION_REQUIRED');
@@ -264,6 +266,7 @@ describe('local application authorization and lifecycle', () => {
   it('migrates v2 credentials without broadening access and preserves a non-overwritten downgrade backup', async () => {
     const f = await fixture({ observation: { read: async () => ({}) } });
     const secret = await f.connect('Execution');
+    expect(await f.server().setCreateVisibleSessions(f.server().connections()[0].id, true)).toBe(true);
     const first = (await f.start(secret)).result;
     const file = path.join(f.directory, 'grants.json');
     const current = JSON.parse(await fs.readFile(file, 'utf8'));
@@ -276,6 +279,7 @@ describe('local application authorization and lifecycle', () => {
     expect(saved.version).toBe(3);
     expect(saved.grants[0].hash).toBe(current.grants[0].hash);
     expect(saved.grants[0].permissions).toEqual(['agent:execute']);
+    expect(saved.grants[0].createVisibleSessions).toBe(true);
     expect(await fs.readFile(`${file}.v2.bak`, 'utf8')).toBe(original);
     await f.connect('Observer', ['tasks:read']);
     expect(await fs.readFile(`${file}.v2.bak`, 'utf8')).toBe(original);

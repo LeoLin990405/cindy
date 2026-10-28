@@ -180,29 +180,31 @@ export function LocalAgentSection() {
                   {t(revoking === connection.id ? 'localAgent.revoking' : 'localAgent.revoke')}
                 </Button>
               </div>
-              <div className={SETTINGS_ROW_CLASS}>
-                <div className="flex min-w-0 flex-col gap-1">
-                  <label
-                    htmlFor={`local-agent-visible-${connection.id}`}
-                    className={SETTINGS_ROW_LABEL_CLASS}
-                  >
-                    {t('localAgent.createVisibleSessions')}
-                  </label>
-                  <p
-                    id={`local-agent-visible-hint-${connection.id}`}
-                    className={SETTINGS_ROW_HINT_CLASS}
-                  >
-                    {t('localAgent.createVisibleSessionsHint')}
-                  </p>
+              {(!connection.permissions?.length || connection.permissions.includes('agent:execute')) && (
+                <div className={SETTINGS_ROW_CLASS}>
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <label
+                      htmlFor={`local-agent-visible-${connection.id}`}
+                      className={SETTINGS_ROW_LABEL_CLASS}
+                    >
+                      {t('localAgent.createVisibleSessions')}
+                    </label>
+                    <p
+                      id={`local-agent-visible-hint-${connection.id}`}
+                      className={SETTINGS_ROW_HINT_CLASS}
+                    >
+                      {t('localAgent.createVisibleSessionsHint')}
+                    </p>
+                  </div>
+                  <Switch
+                    id={`local-agent-visible-${connection.id}`}
+                    aria-describedby={`local-agent-visible-hint-${connection.id}`}
+                    checked={connection.createVisibleSessions === true}
+                    disabled={Boolean(revoking) || Boolean(saving)}
+                    onCheckedChange={(enabled) => void setVisibleSessions(connection.id, enabled)}
+                  />
                 </div>
-                <Switch
-                  id={`local-agent-visible-${connection.id}`}
-                  aria-describedby={`local-agent-visible-hint-${connection.id}`}
-                  checked={connection.createVisibleSessions === true}
-                  disabled={Boolean(revoking) || Boolean(saving)}
-                  onCheckedChange={(enabled) => void setVisibleSessions(connection.id, enabled)}
-                />
-              </div>
+              )}
             </Fragment>
           ))
         ) : (
