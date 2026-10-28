@@ -4,6 +4,12 @@ import { createLocalAgentObservationHost } from '../observationHost.js';
 import { remoteInvoke } from '../../device-link/index.js';
 import { handleListDevices } from '../../device-link/ipc.js';
 import type { Maker } from '@cindy/maker-core';
+import { ipcMain } from 'electron';
+import { DL_HISTORY_MESSAGES_CHANNEL } from '@cindy/device-link';
+import { registerRemoteHistoryIpc } from '../../localDb/ipc/history.js';
+vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }));
+vi.mock('../../localDb/client/current.js', () => ({ getDbClient: vi.fn() }));
+vi.mock('../../localDb/sessionTerminal.js', () => ({ readLatestSessionTerminal: vi.fn() }));
 vi.mock('../../device-link/index.js', () => ({ remoteInvoke: vi.fn() }));
 vi.mock('../../device-link/ipc.js', () => ({ handleListDevices: vi.fn(), defaultDeps: () => ({}) }));
 vi.mock('../../localDb/chatHistoryReader.js', () => ({ listSessionsForHistory: vi.fn(), getMessagesForHistory: vi.fn() }));
@@ -105,6 +111,49 @@ describe('local agent observation read', () => {
     });
     await expect(host.read('observation/sessions', { deviceId: 'remote' }, current)).rejects.toMatchObject({ code: 'REMOTE_INVALID_RESPONSE' });
   });
+  it('filters typed private content and hidden inputs through the real remote history handler before delivery', async () => {
+    const handlers = new Map<string, (...args: any[]) => any>();
+    vi.mocked(ipcMain.handle).mockImplementation((channel, handler) => { handlers.set(channel, handler); });
+    let oversized = false;
+    registerRemoteHistoryIpc({
+      sessionExists: async id => id === 's::opaque',
+      getMessages: async () => ({ ...empty, items: oversized ? [row('large', 'assistant', 'x'.repeat(1024 * 1024))] : [
+        row('thinking', 'assistant', { type: 'thinking', text: 'private thinking' }),
+        row('tool', 'assistant', { type: 'tool_use', content: 'private tool' }),
+        row('trigger', 'user', '[UI_ACTION_TRIGGER]'.concat('private trigger'.repeat(800))),
+        { ...row('resume', 'user', 'private continuation'), agentMeta: { autoResume: true } },
+        row('answer', 'assistant', [{ type: 'text', text: 'visible answer' }, { type: 'thinking', text: 'private block' }]),
+      ] }) as any,
+      readTerminal: async () => undefined,
+    });
+    vi.mocked(handleListDevices).mockResolvedValue({ devices: [{ deviceId: 'remote', name: 'Remote',
+      isSelf: false, online: true, controlEnabled: true, remoteControlEnabled: true, platform: 'macos' } as any] });
+    let request: any;
+    vi.mocked(remoteInvoke).mockImplementation(async (id, channel, values, options) => {
+      expect(id).toBe('remote');
+      expect(channel).toBe(DL_HISTORY_MESSAGES_CHANNEL);
+      options?.preSend?.();
+      request = values[0];
+      return { ok: true, result: await handlers.get(channel)!({}, request) };
+    });
+    const host = createLocalAgentObservationHost({ listActiveSessions: () => [] } as unknown as Maker, () => current);
+    const result = await host.read('observation/history', { deviceId: 'remote', sessionId: 's::opaque' }, current) as any;
+    expect(request).toMatchObject({ sessionId: 's::opaque', contentCharLimit: null, limit: 50, includeRewound: false });
+    expect(result.messages.map((m: any) => m.id)).toEqual(['thinking', 'tool', 'answer']);
+    expect(result.messages.map((m: any) => m.text)).toEqual(['', '', 'visible answer']);
+    expect(result.partial).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('private');
+    oversized = true;
+    await expect(host.read('observation/history', { deviceId: 'remote', sessionId: 's::opaque' }, current))
+      .rejects.toMatchObject({ code: 'REMOTE_PAYLOAD_TOO_LARGE' });
+
+    const { reader } = setup({ readLocalQueue: () => [{ queuedMessageId: 'q', position: 0, source: 'user',
+      sourceLabel: null, enqueuedAtMs: 1, consuming: false, content: '[UI_ACTION_TRIGGER]private queue' }] });
+    const queue = await reader.read('observation/inspect', { sessionIds: ['s'] }, current) as any;
+    expect(queue.sessions[0].queue).toMatchObject({ count: 1, items: [{ content: '', hidden: true, truncated: true }] });
+    expect(JSON.stringify(queue)).not.toContain('private');
+  });
+
   it('preserves source rowid cursors and binds page tokens to every query dimension', async () => {
     const source = { createdAt: 1, id: 'z', rowid: 42 };
     const history = vi.fn<ObservationDeps['history']>(async () => ({ items: [row('z')], nextCursor: source, hasMore: true }));

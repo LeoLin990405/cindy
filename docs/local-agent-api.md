@@ -101,7 +101,11 @@ cc/codex/pi。下一页原样提交 `nextCursor`；游标绑定方法、设备�
 设备页额外声明 `consistency:'live'`，不是快照。读取结果包含 `observedAt` 与 `partial`。
 历史只交付正文文本，不下载附件；每条最多 8,000 字符，整批共享 12,000 字符预算。
 源端已截断、结构化内容超限或可见媒体未交付时保留 `truncated:true`／`partial:true`，
-不能声称拿到了完整要求，也不返回用于判定截断的内部 agentMeta。
+不能声称拿到了完整要求，也不返回用于判定截断的内部 agentMeta。隐藏的合成续跑／UI 指令
+不作为用户问答返回；队列仍保留真实计数和位置，但合成指令正文为空并标记 hidden/truncated。
+远端复用既有单任务历史通道的结构保留模式，先保留正文类型再过滤，不复用会先拍平
+thinking/tool 对象的 MCP 正文摘要；远端原始响应超过 1 MiB 时明确拒绝，仍受设备互联原有
+传输预算限制。原始结构与隐藏内容只在 Cindy 内判定，不交给本机调用方。
 `inspect` 的每个 session 返回 `runtime:{state,authoritative}` 与 `queue`。运行态为
 running/idle/not-active/unknown；本机 v2 运行时缺席只证明 not-active，不证明工作完成。
 远端设备互联可能过滤后台任务，即使保留 v2 外壳也不能把缺席证明为空闲，故仍为 unknown。

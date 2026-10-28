@@ -1,5 +1,5 @@
 import type { Maker } from '@cindy/maker-core';
-import { DeviceLinkError } from '@cindy/device-link';
+import { DeviceLinkError, DL_HISTORY_MESSAGES_CHANNEL } from '@cindy/device-link';
 import { remoteInvoke } from '../device-link/index.js';
 import { handleListDevices, defaultDeps } from '../device-link/ipc.js';
 import { captureDataOwnerBroadcastScope, isDataOwnerBroadcastScopeCurrent } from '../device-link/broadcast-tap.js';
@@ -8,7 +8,7 @@ import { buildHistorySessionDeepLink } from '../deepLink.js';
 import { getDeviceId } from '../authManager.js';
 import type { SessionQueueInspectionEntry } from '../maker-ipc/sessionQueueInspection.js';
 import { createHistoryRemoteDeps } from '../mcp-integrations/historyDevices.js';
-import { readChatHistoryMessages, classifyRemoteHistoryError } from '../mcp-integrations/remoteChatHistory.js';
+import { classifyRemoteHistoryError } from '../mcp-integrations/remoteChatHistory.js';
 import { createLocalAgentObservation, LocalAgentObservationError, type LocalAgentObservation } from './observation.js';
 
 const defaultCaptureAccess = () => {
@@ -83,13 +83,16 @@ export function createLocalAgentObservationHost(
     async history(deviceId, sessionId, args, assertCurrent) {
       // Local IDs are opaque, including IDs containing '::'; never route them by parsing.
       if (deviceId === 'local') return getMessagesForHistory(args);
-      const result = await readChatHistoryMessages({ ...args, sessionIds: [`${deviceId}::${sessionId}`] }, {
-        readLocal: getMessagesForHistory,
-        invokeRemote: (id, channel, values) => remoteInvoke(id, channel, values, { preSend: assertCurrent }),
-      });
-      assertCurrent();
-      if (!result.ok) throw new LocalAgentObservationError(result.errorCode);
-      return result.page;
+      // Preserve types until the observation boundary filters tools/thinking and hidden inputs.
+      // The MCP text-capping adapter flattens objects first and can destroy that evidence.
+      const result = await invoke(deviceId, DL_HISTORY_MESSAGES_CHANNEL, [{
+        sessionId, workdir: args.workdir, fromMs: args.fromMs, toMs: args.toMs,
+        agentKind: args.agentKind, roles: args.roles, includeRewound: false,
+        limit: args.limit, cursor: args.cursor, order: args.order, contentCharLimit: null,
+      }], assertCurrent);
+      if (Buffer.byteLength(JSON.stringify(result.result)) > 1024 * 1024)
+        throw new LocalAgentObservationError('REMOTE_PAYLOAD_TOO_LARGE');
+      return result.result;
     },
     async runtime(deviceId, sessionIds, assertCurrent) {
       if (deviceId === 'local') return {

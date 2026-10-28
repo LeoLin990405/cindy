@@ -2,6 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { GetMessagesParams, ListSessionsParams } from '../localDb/chatHistoryReader.js';
 import type { SessionQueueInspectionEntry } from '../maker-ipc/sessionQueueInspection.js';
 import { DEEP_LINK_SCHEMES } from '../../shared/deepLinkSchemes.js';
+import { isSyntheticTriggerText } from '@cindy/maker-shared/synthetic-trigger';
 
 export const OBSERVATION_METHODS = Object.freeze([
   'observation/devices', 'observation/sessions', 'observation/history', 'observation/inspect',
@@ -196,12 +197,13 @@ export function createLocalAgentObservation(deps: ObservationDeps): LocalAgentOb
           try { entries = supported ? deps.readLocalQueue!(sessionId) : undefined; } catch { entries = undefined; }
           assertCurrent();
           const items = entries?.slice(0, 20).map((entry) => {
-            const content = entry.content.slice(0, Math.min(500, queueTextRemaining));
+            const hidden = isSyntheticTriggerText(entry.content);
+            const content = hidden ? '' : entry.content.slice(0, Math.min(500, queueTextRemaining));
             queueTextRemaining -= content.length;
             return { queuedMessageId: identifier(entry.queuedMessageId, 'INVALID_RESPONSE'), position: entry.position,
               source: entry.source, sourceLabel: entry.sourceLabel?.slice(0, 256) ?? null,
               enqueuedAtMs: entry.enqueuedAtMs, consuming: entry.consuming,
-              content, truncated: content.length < entry.content.length };
+              content, ...(hidden ? { hidden: true } : {}), truncated: hidden || content.length < entry.content.length };
           });
           const truncated = !!entries && (entries.length > 20 || !!items?.some((item) => item.truncated));
           const queue = !supported ? { status: 'unsupported' } : !entries ? { status: 'unavailable' }
@@ -264,7 +266,14 @@ export function createLocalAgentObservation(deps: ObservationDeps): LocalAgentOb
       const messages = p.items.flatMap((r) => {
         if (!['user', 'assistant', 'ask_user', 'plan_review'].includes(String(r.role)) || r.rewindAt != null) { partial = true; return []; }
         const id = identifier(r.id, 'INVALID_RESPONSE');
-        const original = text(r.content), content = original.value.slice(0, Math.min(8000, remaining));
+        const original = text(r.content);
+        const meta = r.agentMeta && typeof r.agentMeta === 'object' && !Array.isArray(r.agentMeta)
+          ? r.agentMeta as Record<string, unknown> : null;
+        if (r.role === 'user' && (meta?.autoResume === true || isSyntheticTriggerText(original.value))) {
+          partial = true;
+          return [];
+        }
+        const content = original.value.slice(0, Math.min(8000, remaining));
         remaining -= content.length;
         const upstreamTruncated = !!r.agentMeta && typeof r.agentMeta === 'object'
           && !Array.isArray(r.agentMeta) && (r.agentMeta as Record<string, unknown>).remoteContentTruncated === true;
