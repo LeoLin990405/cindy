@@ -4464,6 +4464,11 @@ async function syncLibraryReadonlyExtraDir(
 }
 
 let agentInputCoordinatorHolder: AgentInputCoordinator | null = null;
+
+/** Local observation never restores/drains a queue; cold or unrestored state remains unknown. */
+export function inspectLocalAgentQueue(sessionId: string): readonly SessionQueueInspectionEntry[] | null | undefined {
+  return agentInputCoordinatorHolder?.getQueueInspectionIfRestored(sessionId);
+}
 let contextOverflowRolloverHolder: ReturnType<typeof createContextOverflowRollover> | null = null;
 
 /**

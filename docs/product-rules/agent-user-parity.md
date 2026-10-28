@@ -99,6 +99,12 @@ Worker 工具省略 working_dir 时保持继承 Lead 任务记录目录，不跟
   长回复保留首尾片段，总预算进一步收紧时仍保留首尾，避免丢掉末尾结果或阻塞说明。
   不用内部回报替代用户要求，也不只取助手回复最后一行。`finished` 只表示所查任务本轮结束，
   不证明委派工作或用户目标完成；不参与输入放行判定，下一条消息仍按实时运行状态和队列派发。
+- 通用本机调用方观察：`apps/desktop/src/main/local-agent/observation.ts` / `observationHost.ts`，
+  协议见 [`../local-agent-api.md`](../local-agent-api.md) 的 `taskObservation:1`。单独原生确认
+  `tasks:read` 后，分页读取当前账号既有授权电脑的任务和有界正文；不隐式取得执行权限，
+  不暴露 helper token 或任意 IPC。现有执行授权不升权；撤销不停止被观察的既有任务。
+  本机队列只读已恢复快照，远端队列为 unsupported；远端运行时缺席仍为 unknown。
+  这是外部本机调用方接口，不是新增的模型工具；源码支持不代表安装版、真实授权或跨端验收已完成。
 - 伙伴跟进任务：`apps/desktop/src/main/maker-ipc/botWorkbenchAccess.ts`（授权：自动跟进所有任务的伙伴
   可读取既有范围内的任务，含在线电脑；继续或接手还需行动授权，其它伙伴只读自己开的或已接手的任务）。
 - 协议与兼容见 [`../dev-rules/protocol-compatibility.md`](../dev-rules/protocol-compatibility.md)

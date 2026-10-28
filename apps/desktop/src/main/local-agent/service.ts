@@ -28,6 +28,10 @@ import { createLocalAgentServer, LocalAgentError, type LocalAgentServerDeps } fr
 import { withCrossProcessLock } from '../device-link/crossProcessLock.js';
 import { openLocalAgentRuntime } from './runtime.js';
 import { localAgentMessage } from './messages.js';
+import { createLocalAgentObservationHost } from './observationHost.js';
+import { localAgentPermissionConfirmation, localAgentRevokeDetail } from './permissionCopy.js';
+import type { LocalAgentPermission } from '../../shared/localAgent.js';
+import type { SessionQueueInspectionEntry } from '../maker-ipc/sessionQueueInspection.js';
 
 import { confirmLocalAgent, cancelLocalAgentConfirmations } from './confirmation.js';
 
@@ -102,7 +106,10 @@ async function startWithProfileLease(deps: LocalAgentServerDeps) {
   return started;
 }
 
-export function installLocalAgentHost(maker: Maker): void {
+export function installLocalAgentHost(
+  maker: Maker,
+  readQueue?: (sessionId: string) => readonly SessionQueueInspectionEntry[] | null | undefined,
+): void {
   if (current) return;
   const session = getActiveAppSession();
   if (!session.dataOwnerId || isAppSessionBoundaryPending()) return;
@@ -136,19 +143,16 @@ export function installLocalAgentHost(maker: Maker): void {
         });
         return localAgentModels(providers, maker.listAvailableAgents());
       },
-      async approve(signal, client) {
-        const approved = await confirmLocalAgent(
-          {
-            title: t('localAgent.connectTitle'),
-            message: t('localAgent.connectMessage').replaceAll('{{app}}', () => client.name),
-            detail: `${t('localAgent.connectDetail')}\n\n${t('localAgent.clientIdentity')
-              .replaceAll('{{id}}', () => client.id)
-              .replaceAll('{{version}}', () => client.version ?? '—')}`,
-            confirmText: t('localAgent.allow'),
-            cancelText: t('localAgent.cancel'),
-          },
-          signal,
-        );
+      observation: createLocalAgentObservationHost(maker, () => {
+        const assertCurrent = () => {
+          if (scopeNow() !== scope)
+            throw new LocalAgentError('UNAUTHORIZED', 'The Cindy account or runtime has changed.');
+        };
+        assertCurrent();
+        return assertCurrent;
+      }, readQueue),
+      async approve(signal, client, permissions: readonly LocalAgentPermission[] = ['agent:execute']) {
+        const approved = await confirmLocalAgent(localAgentPermissionConfirmation(client, permissions), signal);
         return approved && !signal.aborted && scopeNow() === scope;
       },
       open: (input, bridge) =>
@@ -263,7 +267,7 @@ export async function revokeLocalAgentConnections(
       message: selected
         ? t('localAgent.revokeOneMessage').replaceAll('{{app}}', () => selected.name)
         : t('localAgent.revokeMessage'),
-      detail: selected ? t('localAgent.revokeOneDetail') : t('localAgent.revokeDetail'),
+      detail: localAgentRevokeDetail(selected?.permissions),
       cancelText: t('localAgent.cancel'),
       confirmText: t('localAgent.revoke'),
     });

@@ -1,5 +1,8 @@
 import { mountPage, subscription } from '../../ui-page/harness';
 import { LocalAgentConfirmationHost } from '../../../src/renderer/components/LocalAgentConfirmationHost';
+import { localAgentPermissionConfirmation, localAgentRevokeDetail } from '../../../src/main/local-agent/permissionCopy';
+
+Object.assign(window, { localAgentPermissionConfirmation, localAgentRevokeDetail });
 
 mountPage({
   host: {

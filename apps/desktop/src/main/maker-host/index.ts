@@ -125,6 +125,7 @@ import {
   captureRemoteWorkerReportSettlement,
   captureLocalWorkerReport,
   getSessionActiveInputClientIds,
+  inspectLocalAgentQueue,
   getSessionInputProvenance,
   isActiveInputOwnerAuthored,
   isActiveInputAccountScoped,
@@ -3201,7 +3202,7 @@ export function getMaker(): Maker {
     });
     // 本机作为「Agent 运行的电脑」：同账号另一台电脑的任务可让 Agent 在这里运行。
     installRemoteAgentHost({ getMaker: () => getMaker(), userDataDir: app.getPath('userData') });
-    installLocalAgentHost(_maker);
+    installLocalAgentHost(_maker, inspectLocalAgentQueue);
     botRuntimeResourcePreflight = async (opts) => {
       const preflightOpts = { ...opts };
       return hydrateBotProfileRuntime(preflightOpts, buildBotRuntimeDeps(), {

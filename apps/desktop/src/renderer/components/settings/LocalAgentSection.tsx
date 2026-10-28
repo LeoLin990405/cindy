@@ -159,6 +159,15 @@ export function LocalAgentSection() {
                       ? t('localAgent.clientId', { id: connection.clientId })
                       : t('localAgent.description')}
                   </p>
+                  <p className={`${SETTINGS_ROW_HINT_CLASS} break-words`}>
+                    {connection.permissions?.length
+                      ? connection.permissions.map((permission) =>
+                          t(permission === 'agent:execute'
+                            ? 'localAgent.permissionExecute'
+                            : 'localAgent.permissionRead', { permission }),
+                        ).join(' · ')
+                      : t('localAgent.permissionsUnreported')}
+                  </p>
                 </div>
                 <Button
                   className="shrink-0"

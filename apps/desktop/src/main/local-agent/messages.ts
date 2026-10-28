@@ -9,6 +9,7 @@ export function localAgentMessage(code: string): string {
       break;
     case 'UNAUTHORIZED':
     case 'FORBIDDEN':
+    case 'PERMISSION_REQUIRED':
       key = 'authorizationRequired';
       break;
     case 'PAIR_EXPIRED':

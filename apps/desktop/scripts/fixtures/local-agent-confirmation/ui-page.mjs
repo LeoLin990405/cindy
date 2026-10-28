@@ -1,28 +1,50 @@
 export default {
   name: 'local-agent-confirmation', entry: './fixture.tsx', viewport: { width: 900, height: 650 },
-  real: 'LocalAgentConfirmationHost, ConfirmDialogProvider and themed ConfirmDialog',
+  real: 'permissionCopy, LocalAgentConfirmationHost, ConfirmDialogProvider and themed ConfirmDialog',
+  stubs: {
+    'src/main/i18n': 'import i18n from "@/i18n"; export const t = key => i18n.t(key);',
+  },
   notCovered: 'Main IPC sender validation and actual API grants are verified separately in service and isolated Desktop checks.',
   cases: {
     default: { about: 'Approve through the shared themed confirmation', data: { action: 'allow' } },
+    observation: { about: 'Read-only approval discloses existing and future sessions, not execution', data: { action: 'allow', permissions: ['tasks:read'] } },
+    combined: { about: 'Combined approval discloses both permissions', data: { action: 'allow', permissions: ['agent:execute', 'tasks:read'] } },
+    'revoke-observation': { about: 'Revoking observation leaves observed sessions running', data: { action: 'revoke', permissions: ['tasks:read'] } },
+    'revoke-combined': { about: 'Revoking both only stops connection-owned executions', data: { action: 'revoke', permissions: ['agent:execute', 'tasks:read'] } },
+    'revoke-all': { about: 'All-grant disclosure distinguishes executions from observed sessions', data: { action: 'revoke', all: true } },
     cancel: { about: 'Cancel returns a negative decision', data: { action: 'cancel' } },
     escape: { about: 'Escape dismisses without granting', data: { action: 'escape' } },
     revoke: { about: 'Confirm revocation with the existing localized copy', data: { action: 'revoke' } },
     abort: { about: 'Main dismissal cannot yield a late approval', data: { action: 'abort' } },
     queued: { about: 'Cancelling the first request preserves the second', data: { action: 'queued' } },
-    narrow: { about: 'Long unverified identity wraps at 320px', viewport: { width: 320, height: 640 }, data: { action: 'allow', long: true } },
+    narrow: { about: 'Combined permissions and long unverified identity wrap at 320px', viewport: { width: 320, height: 640 }, data: { action: 'allow', long: true, permissions: ['agent:execute', 'tasks:read'] } },
   },
   async check(page, ui) {
     const app = ui.data.long ? 'ApplicationWithAnUnbrokenLongName独立客户端'.repeat(3) : 'Notes';
     const revoke = ui.data.action === 'revoke';
-    const request = {
+    // Production copy + real dialog: the old execute-only fixture could not catch
+    // a read-only request accidentally presenting execution authority (UI tier).
+    const permissions = ui.data.permissions ?? ['agent:execute'];
+    const request = revoke ? {
       requestId: 'first',
-      title: await ui.t(revoke ? 'localAgent.title' : 'localAgent.connectTitle'),
-      message: await ui.t(revoke ? 'localAgent.revokeOneMessage' : 'localAgent.connectMessage', { app }),
-      detail: await ui.t(revoke ? 'localAgent.revokeOneDetail' : 'localAgent.connectDetail'),
-      confirmText: await ui.t(revoke ? 'localAgent.revoke' : 'localAgent.allow'),
+      title: await ui.t('localAgent.title'),
+      message: await ui.t(ui.data.all ? 'localAgent.revokeMessage' : 'localAgent.revokeOneMessage', { app }),
+      detail: await page.evaluate(permissions => window.localAgentRevokeDetail(permissions), ui.data.all ? undefined : permissions),
+      confirmText: await ui.t('localAgent.revoke'),
       cancelText: await ui.t('localAgent.cancel'),
-    };
-    if (!revoke) request.detail += '\n\n' + await ui.t('localAgent.clientIdentity', { id: 'org.example.notes', version: '1.2' });
+    } : await page.evaluate(({ app, permissions }) => ({
+      requestId: 'first',
+      ...window.localAgentPermissionConfirmation({ id: 'org.example.notes', name: app, version: '1.2' }, permissions),
+    }), { app, permissions });
+    const executeDetail = await ui.t(revoke ? (ui.data.all ? 'localAgent.revokeDetail' : 'localAgent.revokeOneDetail') : 'localAgent.connectDetail');
+    const readDetail = await ui.t(revoke ? (ui.data.all ? 'localAgent.revokeReadDetail' : 'localAgent.revokeReadOneDetail') : 'localAgent.connectReadDetail');
+    if (request.detail.includes(executeDetail) !== (Boolean(ui.data.all) || permissions.includes('agent:execute'))) throw new Error('Wrong execution disclosure');
+    if (request.detail.includes(readDetail) !== (Boolean(ui.data.all) || permissions.includes('tasks:read'))) throw new Error('Wrong observation disclosure');
+    if (!revoke) {
+      const restricted = permissions.includes('tasks:read') && !permissions.includes('agent:execute');
+      if (request.detail.includes(await ui.t('localAgent.readOnlyDetail')) !== restricted) throw new Error('Wrong read-only restrictions');
+      if (!request.detail.includes(await ui.t('localAgent.clientIdentity', { id: 'org.example.notes', version: '1.2' }))) throw new Error('Missing unverified identity');
+    }
     const emit = (name, payload) => page.evaluate(({ name, payload }) => window.__uiPage.emit(name, payload), { name, payload });
     await emit('confirmation', request);
     const dialog = page.getByRole('alertdialog');

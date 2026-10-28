@@ -1,6 +1,6 @@
 const connections = [
-  { id: 'grant-notes', name: 'Notes', clientId: 'org.example.notes' },
-  { id: 'grant-board', name: 'Board', clientId: 'org.example.board' },
+  { id: 'grant-notes', name: 'Notes', clientId: 'org.example.notes', permissions: ['agent:execute'] },
+  { id: 'grant-board', name: 'Board', clientId: 'org.example.board', permissions: ['tasks:read'] },
 ];
 
 export default {
@@ -19,6 +19,7 @@ export default {
     default: { about: 'Revoke one application and retain the other row', data: { connections } },
     'visible-enabled': { about: 'Toggle one application without changing another', data: { connections: [{ ...connections[0], createVisibleSessions: true }, connections[1]] } },
     'save-failed': { about: 'A failed preference write retains the previous setting', data: { connections, saveFailed: true } },
+    combined: { about: 'Combined grant displays both exact permissions', data: { connections: [{ ...connections[0], permissions: ['agent:execute', 'tasks:read'] }, connections[1]] } },
     long: { about: 'Long unverified application names and IDs at phone width', viewport: { width: 390, height: 844 }, data: { connections: [
       { id: 'grant-long', name: 'Independent application with a long name 独立本机应用程序', clientId: 'org.example.an.independent.application.with.a.long.identifier' }, connections[1],
     ] } },
@@ -62,6 +63,19 @@ export default {
       await page.getByText(await ui.t(ui.data.loadFailed ? 'localAgent.failed' : 'localAgent.empty'), { exact: true }).waitFor();
       return;
     }
+    // Production settings rows must distinguish execute/read/combined/missing
+    // permissions; the previous fixture supplied no permission metadata (UI tier).
+    for (const connection of list) {
+      const row = page.getByText(connection.clientId, { exact: false }).locator('..');
+      const labels = connection.permissions?.length
+        ? await Promise.all(connection.permissions.map(permission => ui.t(permission === 'agent:execute' ? 'localAgent.permissionExecute' : 'localAgent.permissionRead', { permission })))
+        : [await ui.t('localAgent.permissionsUnreported')];
+      await row.getByText(labels.join(' · '), { exact: true }).waitFor();
+      for (const [permission, key] of [['agent:execute', 'permissionExecute'], ['tasks:read', 'permissionRead']]) {
+        if (!connection.permissions?.includes(permission) && (await row.textContent()).includes(await ui.t(`localAgent.${key}`, { permission }))) throw new Error('Row displays ungranted permission');
+      }
+    }
+    await ui.capture('permissions');
     await page.getByText(list[0].clientId, { exact: false }).waitFor();
     const toggles = page.getByRole('switch', { name: await ui.t('localAgent.createVisibleSessions'), exact: true });
     if (await toggles.nth(0).isChecked() !== Boolean(list[0].createVisibleSessions)) throw new Error('Wrong initial visibility');

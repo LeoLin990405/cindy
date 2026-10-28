@@ -86,14 +86,14 @@ async function fixture(overrides: Partial<LocalAgentServerDeps> = {}) {
     });
     return response.json() as Promise<any>;
   };
-  const pair = async (client: unknown = 'HHH') => {
-    const { result } = await rpc('connect/start', { client });
+  const pair = async (client: unknown = 'HHH', permissions?: unknown) => {
+    const { result } = await rpc('connect/start', { client, permissions });
     if (!result) throw new Error('client pairing rejected');
     await fetch(result.url);
     return { result, response: await rpc('connect/poll', { id: result.id, claim: result.claim }) };
   };
-  const connect = async (client: unknown = 'HHH') =>
-    (await pair(client)).response.result.token as string;
+  const connect = async (client: unknown = 'HHH', permissions?: unknown) =>
+    (await pair(client, permissions)).response.result.token as string;
   const start = (secret: string, sessionId = 'run', extra = {}) =>
     rpc(
       'session/open',
@@ -178,6 +178,110 @@ describe('local application authorization and lifecycle', () => {
     expect(f.open.mock.calls.at(-1)![0].visibleSession).toBeUndefined();
   });
 
+  // Observation expands private-data authority; legacy grants must never acquire it and read-only grants cannot execute.
+  it('requires an independently consented task-read grant and denies every execution method to observation-only clients', async () => {
+    const read = vi.fn(async () => ({ devices: [{ id: 'local' }] }));
+    const approve = vi.fn(async () => true);
+    const f = await fixture({ observation: { read }, approve });
+    const execute = await f.connect({ id: 'org.example.app', name: 'Notes' });
+    const paired = await f.pair({ id: 'org.example.app', name: 'Notes' }, ['tasks:read']);
+    const observe = paired.response.result.token;
+    expect(paired.response.result.permissions).toEqual(['tasks:read']);
+    expect(approve.mock.calls.map((args: any[]) => args[2])).toEqual([['agent:execute'], ['tasks:read']]);
+    expect((await f.rpc('observation/devices', {}, execute)).error.code).toBe('PERMISSION_REQUIRED');
+    expect(read).not.toHaveBeenCalled();
+    expect((await f.rpc('observation/devices', {}, observe)).result.devices).toEqual([{ id: 'local' }]);
+    for (const method of ['models', 'session/open', 'send', 'steer', 'interrupt', 'instructions', 'events', 'tool/reply', 'session/close']) {
+      expect((await f.rpc(method, { sessionId: 'other-task' }, observe)).error.code).toBe('PERMISSION_REQUIRED');
+    }
+    expect(f.open).not.toHaveBeenCalled();
+    expect(f.server().connections().map(item => item.permissions)).toEqual([['agent:execute'], ['tasks:read']]);
+    const caps = (await f.rpc('capabilities')).result;
+    expect(caps.features.taskObservation).toBe(1);
+    expect(caps.features.nativeReadOnly).toBe(false);
+    expect(caps.methods).toContain('observation/devices');
+  });
+
+  it('rejects malformed permissions and unsupported observation before showing consent', async () => {
+    const approve = vi.fn(async () => true);
+    const f = await fixture({ approve });
+    for (const permissions of [[], ['tasks:read', 'tasks:read'], ['admin'], 'tasks:read', null]) {
+      expect((await f.rpc('connect/start', { client: 'Notes', permissions })).error.code).toBe('INVALID_REQUEST');
+    }
+    expect((await f.rpc('connect/start', { client: 'Notes', permissions: ['tasks:read'] })).error.code).toBe('METHOD_UNSUPPORTED');
+    expect(approve).not.toHaveBeenCalled();
+    expect((await f.rpc('capabilities')).result.features.taskObservation).toBeUndefined();
+  });
+
+  it.each(['revoke', 'owner-change'])('withholds a pending observation after %s without stopping observed tasks', async boundary => {
+    let scope = 'owner';
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const f = await fixture({ scope: () => scope, observation: { read: async () => {
+      entered();
+      await gate;
+      return { text: 'private task result' };
+    } } });
+    const execute = await f.connect('Execution');
+    await f.start(execute);
+    const observe = await f.connect('Observer', ['tasks:read']);
+    const pending = f.rpc('observation/devices', {}, observe);
+    await started;
+    if (boundary === 'revoke') await f.server().revoke(f.server().connections()[1].id);
+    else scope = 'another-owner';
+    release();
+    const response = await pending;
+    expect(response.error.code).toBe('UNAUTHORIZED');
+    expect(response.result).toBeUndefined();
+    // Revoking a reader does not close another grant's execution, much less a pre-existing task.
+    expect(f.close).not.toHaveBeenCalled();
+  });
+
+  it('does not cache observation results under execution request dedup identities', async () => {
+    let revision = 0;
+    const f = await fixture({ observation: { read: async () => ({ revision: ++revision }) } });
+    const secret = await f.connect('Observer', ['tasks:read']);
+    expect((await f.rpc('observation/devices', {}, secret, 'same-read:1')).result.revision).toBe(1);
+    expect((await f.rpc('observation/devices', {}, secret, 'same-read:1')).result.revision).toBe(2);
+    await f.restart();
+    expect((await f.rpc('models', {}, secret)).error.code).toBe('PERMISSION_REQUIRED');
+  });
+
+  it.each([undefined, [], ['tasks:read', 'admin'], ['tasks:read', 'tasks:read']])('refuses malformed v3 stored permissions without repairing or broadening the grant (%j)', async permissions => {
+    const f = await fixture();
+    await f.connect('Execution');
+    const file = path.join(f.directory, 'grants.json');
+    const current = JSON.parse(await fs.readFile(file, 'utf8'));
+    current.grants[0].permissions = permissions;
+    const invalid = JSON.stringify(current);
+    await fs.writeFile(file, invalid);
+    await expect(f.restart()).rejects.toMatchObject({ code: 'GRANT_STORE_INVALID' });
+    expect(await fs.readFile(file, 'utf8')).toBe(invalid);
+  });
+
+  it('migrates v2 credentials without broadening access and preserves a non-overwritten downgrade backup', async () => {
+    const f = await fixture({ observation: { read: async () => ({}) } });
+    const secret = await f.connect('Execution');
+    const first = (await f.start(secret)).result;
+    const file = path.join(f.directory, 'grants.json');
+    const current = JSON.parse(await fs.readFile(file, 'utf8'));
+    const original = JSON.stringify({ ...current, version: 2, grants: current.grants.map(({ permissions: _permissions, ...grant }: any) => grant) });
+    await fs.writeFile(file, original);
+    await f.restart();
+    expect((await f.start(secret, 'resumed', { resume: first.id })).result.resumed).toBe(true);
+    expect((await f.rpc('observation/devices', {}, secret)).error.code).toBe('PERMISSION_REQUIRED');
+    const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+    expect(saved.version).toBe(3);
+    expect(saved.grants[0].hash).toBe(current.grants[0].hash);
+    expect(saved.grants[0].permissions).toEqual(['agent:execute']);
+    expect(await fs.readFile(`${file}.v2.bak`, 'utf8')).toBe(original);
+    await f.connect('Observer', ['tasks:read']);
+    expect(await fs.readFile(`${file}.v2.bak`, 'utf8')).toBe(original);
+    await f.restart();
+    expect((await f.rpc('observation/devices', {}, secret)).error.code).toBe('PERMISSION_REQUIRED');
+  });
   it('bounds untrusted connection-code handshakes without following redirects or hanging on a reused port', async () => {
     let mode = 'redirect';
     let requests = 0;
@@ -574,7 +678,8 @@ describe('local application authorization and lifecycle', () => {
       resume: 'native-session',
     });
     const saved = JSON.parse(await fs.readFile(file, 'utf8'));
-    expect(saved.version).toBe(2);
+    expect(saved.version).toBe(3);
+    expect(saved.grants[0].permissions).toEqual(['agent:execute']);
     expect(saved.grants[0].hash).toBe(current.grants[0].hash);
     expect(await fs.readFile(`${file}.v1.bak`, 'utf8')).toBe(original);
     await f.connect({ id: 'org.example.notes', name: 'Notes' });

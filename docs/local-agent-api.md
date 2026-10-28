@@ -59,22 +59,64 @@ node scripts/examples/local-agent-client.mjs --connection-code "cindy-local:v1:<
 
 成功为 `{"result":...}`，失败为 `{"error":{"code":"...","message":"..."}}`；错误的 `code` 用于程序判断，`message` 用于展示。RPC 不使用 JSON-RPC 的 `jsonrpc` 字段。Host 必须为发现的 loopback 地址，任何带 Origin 的请求都拒绝；这是供本机进程使用的接口，不开放浏览器 CORS。
 
-`capabilities` 无需授权，返回 `protocol`、Cindy `version`、`instance`、可用 `methods` 和 `features`。当前通用扩展声明 `clientIdentity`、`isolatedSessions`、`individualRevocation`、`toolPolicy` 为 true，`nativeReadOnly` 为 false。未声明的能力不得假定支持。`instance` 保持可选以兼容早期 v1 客户端，新客户端应始终携带；实例改变后重新发现，不自动重放旧操作。
+`capabilities` 无需授权，返回 `protocol`、Cindy `version`、`instance`、可用 `methods` 和 `features`。当前通用扩展声明 `clientIdentity`、`isolatedSessions`、`individualRevocation`、`toolPolicy`、`scopedPermissions` 为 true；装配只读任务观察时另声明 `taskObservation: 1`。`nativeReadOnly` 仍为 false：任务观察只读不代表原生执行具有只读文件沙箱。能力声明不等于调用方已获授权。未声明的能力不得假定支持。`instance` 保持可选以兼容早期 v1 客户端，新客户端应始终携带；实例改变后重新发现，不自动重放旧操作。
 
 有副作用的请求编号必须是 `<process-nonce>:<counter>`，nonce 为 8–64 位 `[A-Za-z0-9_-]`，counter 从 1 单调递增、最多 15 位。去重按**授权 + 完整请求编号**计算，同编号不同 payload 拒绝；每个进程保留最近 256 个编号的窗口，已过期请求拒绝执行，不重新提交。重启后用新 nonce，不依赖旧实例的去重记录。每个授权最多同时保留 32 个进程 nonce（全部授权合计 128 个）；名额用满时，空闲超过 10 分钟的 nonce 会被回收，之后再用该 nonce 的请求返回 `REQUEST_EXPIRED` 且不执行，仍无可回收名额时返回 `CLIENT_LIMIT`。网络超时表示结果可能未知；任何消息、工具副作用或控制请求都不能用新编号自动重试。
 
 ## 应用授权
 
-1. `connect/start`：`{"client":{"id":"org.example.notes","name":"Notes","version":"1.0"}}`，返回 `{id,claim,url}`。id 最多 128 字符，只含字母、数字、点、下划线、连字符且以字母或数字开头；名称最多 80 字符，version 可省略、最多 64 字符。名称/版本不接受控制或双向覆盖字符。
+1. `connect/start`：`{"client":{"id":"org.example.notes","name":"Notes","version":"1.0"},"permissions":["tasks:read"]}`，返回 `{id,claim,url}`。权限只能是 `agent:execute`、`tasks:read` 的非空、不重复数组。只有省略 `permissions` 时才兼容为旧版的 `['agent:execute']`；显式 `['tasks:read']` 不附带执行权，不能调用 models、open、send、events 或任何执行控制。两项都要使用时必须同时申请并在原生确认中展示。已有授权不按应用 id 升权；新增读取须另行原生确认并签发独立授权。id 最多 128 字符，只含字母、数字、点、下划线、连字符且以字母或数字开头；名称最多 80 字符，version 可省略、最多 64 字符。名称/版本不接受控制或双向覆盖字符。
 2. Cindy 在**本机**显示应用自报名称、编号及能力说明，由用户允许或取消。客户端无需打开返回的兼容网页才能触发弹窗。允许连接和撤销连接复用 Cindy 的主题确认组件及确认队列，默认焦点在取消，支持 Esc、Tab 焦点约束；不会弹出操作系统消息框。
-3. `connect/poll`：`{id,claim}`，返回 `{state:"waiting"|"denied"|"approved",token?}`；通过后才有 token。申请两分钟过期。`connect/cancel` 用同一组 id/claim 取消并撤销该申请已经签发的授权。
+3. `connect/poll`：`{id,claim}`，返回 `{state:"waiting"|"denied"|"approved",token?,permissions?}`；通过后才有 token 和实际权限。申请两分钟过期。`connect/cancel` 用同一组 id/claim 取消并撤销该申请已经签发的授权。
 确认请求由 Main 生成不可复用的编号，只投递到当前可信主窗口；回包必须来自同一窗口的顶层 Cindy 页面。窗口关闭、崩溃、导航（含页内导航）、账号换代、宿主关闭、请求取消或超时都会取消待确认项，迟到回包不能批准。Renderer 只提供用户选择，Main 在执行前再次核对 owner generation 与请求归属；HTTP 客户端不能提交确认回包。并发请求沿用 Cindy 的确认队列，各自独立结算。
 
 4. 后续请求带 `Authorization: Bearer <token>`。`connect/revoke` 无参数，只撤销**当前令牌自己的授权**。
 
 应用名称、id、version 都是申请方自报的展示资料，不能证明安装包或发布者身份。相同 app id / 名称不会得到已有授权或会话；每次经用户允许产生独立、不可猜测的 bearer 凭据。名字不是认证依据，不按品牌自动批准。
 
-设置 → 远程连接 → 本机应用连接逐条显示应用和自报编号，每条可单独撤销。撤销同时失效令牌、恢复绑定、工具桥接与事件轮询，并关闭该授权的执行会话；其他授权保持可用。旧设置调用不带编号的“全部撤销”仍兼容。账号切换和退出会关闭本机 API；数据仍按 Cindy 的账号 owner 隔离。
+设置 → 远程连接 → 本机应用连接逐条显示应用、自报编号和授权权限，每条可单独撤销。撤销同时失效令牌、恢复绑定、工具桥接、观察读取与事件轮询，并只关闭该授权自己的执行会话，不关闭被观察的既有任务；其他授权保持可用。旧设置调用不带编号的“全部撤销”仍兼容。账号切换和退出会关闭本机 API；数据仍按 Cindy 的账号 owner 隔离。
+
+## 只读任务观察（`taskObservation: 1`）
+
+这是通用本机调用方能力，不绑定某个 Dashboard、MCP App 或应用品牌。首次读取之前必须核对能力，
+再以 `permissions:['tasks:read']` 经 Cindy 原生确认申请；不能借旧执行 token、内部 helper token、
+插件令牌、系统文件或任意 IPC 绕过。HTTP 入口仍只监听本机 loopback；远端内容由本机 Cindy
+复用当前账号已有的设备互联授权取得，不提供新的跨机登录、凭证或公开接口。
+
+| method | params | 结果边界 |
+|---|---|---|
+| `observation/devices` | `{limit?,cursor?}` | 授权电脑分页，含可用性和不可用原因；不启用远控 |
+| `observation/sessions` | `{deviceId?,limit?,cursor?,order?,workdir?,fromMs?,toMs?,agentKind?}` | 单台电脑既有任务分页与宿主生成的任务链接；不包含已删除任务 |
+| `observation/history` | `{deviceId?,sessionId,limit?,cursor?,order?,workdir?,fromMs?,toMs?,agentKind?}` | 单个任务可见问答分页；不含工具、思考、已 rewind 内容或任意 agentMeta |
+| `observation/inspect` | `{deviceId?,sessionIds}` | 最多 32 个明确目标的运行态与有界队列快照 |
+
+`deviceId` 默认 `local`；远端只接受设备列表中的精确 id，不接受 `all` 或转发到第三台电脑。
+`sessionId` 是该来源电脑上的不透明原 id，与 deviceId 分开传；不要自行拆装 id。
+分页默认 50、最多 100 条，`order` 为 asc/desc；毫秒时间窗为 `[fromMs,toMs)`，agentKind 为
+cc/codex/pi。下一页原样提交 `nextCursor`；游标绑定方法、设备、任务和查询条件，篡改或跨查询使用
+拒绝，不静默回到首页。游标不是授权、也不是稳定快照；活动中的列表会变化。宿主换代后重新握手、
+从所需起点重新读取，不将旧游标视为仍有效。
+
+分页结果分别使用 `devices`、`sessions`、`messages` 数组，以及 `hasMore`、`nextCursor`；
+设备页额外声明 `consistency:'live'`，不是快照。读取结果包含 `observedAt` 与 `partial`。
+历史只交付正文文本，不下载附件；每条最多 8,000 字符，整批共享 12,000 字符预算。
+源端已截断、结构化内容超限或可见媒体未交付时保留 `truncated:true`／`partial:true`，
+不能声称拿到了完整要求，也不返回用于判定截断的内部 agentMeta。
+`inspect` 的每个 session 返回 `runtime:{state,authoritative}` 与 `queue`。运行态为
+running/idle/not-active/unknown；本机 v2 运行时缺席只证明 not-active，不证明工作完成。
+远端设备互联可能过滤后台任务，即使保留 v2 外壳也不能把缺席证明为空闲，故仍为 unknown。
+队列未恢复／不可检查、远端不支持队列只读检查，均保留 unavailable/unsupported；
+`queue.status:'available'` 才含 count/items/truncated，不用空数组或零代替未知值。
+队列每个任务最多 20 条、每条正文摘要最多 500 字符；检查不恢复、不排空、不启动任务。
+原有远端 `maker:input:get-projection` 可能恢复队列，因此不用于观察。离线、禁用、撤权、旧端不支持
+与超时按设备报告；没有覆盖所有设备和各自游标时不能声称全量。单次编码结果上限 128 KiB；
+分页返回 `RESPONSE_TOO_LARGE` 时保留原游标、缩小 limit 重读，不越过未交付行；
+`inspect` 无 limit，应缩小 sessionIds、分批检查。
+
+调用在开始、每个异步读取与返回前复核调用方授权和账号代次；远端继续使用 Cindy 既有授权门。
+撤销停止该授权的读取，不关闭被观察的既有任务；另一个应用的授权不受影响。读取不进入执行结果
+去重缓存，重复读取会重新检查授权并取得新的观察结果。native-read-only 文件执行仍不受此声明支持。
+真实授权、安装版能力、跨电脑可达性与源数据完整性须分别验收；源码或测试通过不代表已经部署。
 
 ### 在 Cindy 中创建可见任务
 
@@ -132,17 +174,17 @@ node scripts/examples/local-agent-client.mjs --connection-code "cindy-local:v1:<
 
 默认使用 `Maker.startLocalAgentSession` 复用三种引擎及既有内存 `Session`，由同一套发送、原生续段、终态归属、工具循环与关闭生命周期管理执行；不建立第二个 Agent 循环，也不写入 Cindy 的私人任务数据库或装载私人记忆。用户为应用开启可见任务后，改走既有 `Maker.createSession` 和 Desktop 消息记录管线，工具策略仍由原本机能力约束。原生带 continuation claim 的 done 只是 SDK 段落边界，不能提前宣布客户端执行完成或接受下一轮发送。原生 cancelled 投影为 interrupted。
 
-Claude client-only 关闭原生 tools/settings/skills；Pi 仅开启客户端网关；Codex 使用独立模型工具目录、app-server 与原生历史配置，保留所选模型的窗口配置。client-only 不合入 Cindy 的其他 MCP。Cindy 固定身份、回答呈现、host system prompt 及既有动态段装配保持原样；插件花名册仍由原回调按工作目录、启用状态和账号可见性产生，通讯录说明沿用各引擎现有可用性判断。花名册与提示词不是工具授权；连接未注册的私人 MCP 仍不可调用，也不因此取得私人任务、记忆或供应商凭据。静态指引可能提及本连接未开放的能力，调用方须按本连接实际登记的工具与公开事件处理，不能仅凭文字假定能力已获授权。Codex native 排除自动继承的私有 MCP 连接与 Apps 账号连接（包括原生插件自带的 MCP 服务，它们可能携带账号凭据），同时保留工作目录的原生技能、原生插件与执行能力，不复用 Review 的全量技能禁用策略。native 模式仍可读取工作目录和引擎原生配置；其文件访问受本机系统用户权限支配，API 隔离不是对同一系统用户下恶意程序的 OS 沙箱。
+Claude client-only 关闭原生 tools/settings/skills；Pi 仅开启客户端网关；Codex 使用独立模型工具目录、app-server 与原生历史配置，保留所选模型的窗口配置。client-only 不合入 Cindy 的其他 MCP。Cindy 固定身份、回答呈现、host system prompt 及既有动态段装配保持原样；插件花名册仍由原回调按工作目录、启用状态和账号可见性产生，通讯录说明沿用各引擎现有可用性判断。花名册与提示词不是工具授权；连接未注册的私人 MCP 仍不可调用，也不因此取得私人任务、记忆或供应商凭据。私人任务观察只有另行原生确认的 `tasks:read` 授权可用，不由执行会话的提示词或工具策略隐式授予。静态指引可能提及本连接未开放的能力，调用方须按本连接实际登记的工具与公开事件处理，不能仅凭文字假定能力已获授权。Codex native 排除自动继承的私有 MCP 连接与 Apps 账号连接（包括原生插件自带的 MCP 服务，它们可能携带账号凭据），同时保留工作目录的原生技能、原生插件与执行能力，不复用 Review 的全量技能禁用策略。native 模式仍可读取工作目录和引擎原生配置；其文件访问受本机系统用户权限支配，API 隔离不是对同一系统用户下恶意程序的 OS 沙箱。
 
 关闭、撤销授权及晚到的启动结果以 account-boundary 原因关闭内存 Session，连同其持有的原生子执行收尾。无法确认进程退出时返回 `RUNTIME_CLOSE_UNCONFIRMED`，保留清理对象供宿主关闭重试；令牌及工具入口仍立即失效，不将不确定的停止报告为已经结束。
 
 持久授权存放在 owner-scoped `local-agent/grants.json`：只含令牌 SHA-256、账号范围、服务端授权 id、自报身份及归属此授权的恢复绑定。它不存令牌明文、供应商凭据或消息正文。写入及异常恢复复用 Main 的 `atomicWriteFileSync` / `readAtomicFileSync`，不另造 Windows 替换协议。profile 根 `local-agent/host.lock` 复用既有跨进程锁：同一 profile 只有一个发现端点和授权快照写入者，共库预览实例不能覆盖撤销结果；Maker 替换等待旧端点释放。账号持久范围与运行期的 owner generation 分开，切走再切回同一账号也不会复活旧的在途确认。
 
-新授权的临时输入和 Codex 运行历史配置位于 `local-agent/clients/<grant-hash>/`；Codex 的可重建模型工具目录仍在 `local-agent/codex-catalogs/`。其他引擎的原生转录由其原有适配器管理，API 只保存自己签发的恢复绑定，不暴露跨应用列举接口。
+新授权的临时输入和 Codex 运行历史配置位于 `local-agent/clients/<grant-hash>/`；Codex 的可重建模型工具目录仍在 `local-agent/codex-catalogs/`。其他引擎的原生转录由其原有适配器管理，执行 API 只保存自己签发的恢复绑定，不暴露其他授权的执行会话或恢复句柄。单独授权的任务观察只通过上述有界只读入口读取既有 Cindy 任务，不改变执行隔离。
 
-授权文件由 schema 1 升到 2：校验旧文件后保留令牌哈希、授权 id、账号和绑定；首次写入前以独占创建保留 `grants.json.v1.bak`，新格式经临时文件原子替换。存量 v1 授权保留历史 `hhh` MCP 名称和旧原生存储定位，仅用于已存授权的恢复兼容；所有新连接都使用通用 namespace。旧字符串形式的 `client` 也保持支持，并按通用名称生成自报身份，不再限制品牌。
+授权文件使用 schema 3。校验 v1/v2 旧文件后保留令牌哈希、授权 id、账号、身份、legacyRuntime 和恢复绑定，旧授权仅迁移为 `['agent:execute']`，不增加任务观察权限。首次写入前以独占创建保留原版本的 `grants.json.v1.bak` 或 `grants.json.v2.bak`，不覆盖已有备份，新格式仍复用原子替换。存量 v1 授权保留历史 `hhh` MCP 名称和旧原生存储定位，仅用于已存授权的恢复兼容；所有新连接都使用通用 namespace。旧字符串形式的 `client` 也保持支持。
 
-不认识的版本或损坏文件拒绝加载并保留原文件，不清空重建。schema 1 的旧二进制不能读 schema 2；降级不能直接覆盖现有文件，应使用独立 profile。旧版备份只反映升级时状态，不包含之后新增/撤销的授权；不要将它当成无损降级或在撤销后自动恢复备份。
+不认识的版本、损坏文件或无效 v3 权限拒绝加载并保留原文件，不清空重建。不能把只读权限附在 v2 上：旧执行版会忽略权限字段，把观察 token 误当执行权。因此旧 schema 1/2 二进制必须拒绝 v3；降级应使用独立 profile，不自动恢复备份。备份只反映迁移时状态，不包含之后新增／撤销的授权，不是无损降级或撤销后的恢复源。
 
 会话上限 16，授权上限 32，申请上限 8；这些是当前实例的资源预算，不是按品牌分配。请求最大 16 MiB，单会话事件队列最大 8 MiB，事件每批通常不超过 1 MiB（单个大事件可独占一批），空闲会话三分钟回收，单会话最多 64 个待回传工具。超限会返回明确错误或收尾该会话，不转发到另一个供应商。协议不自动重试模型和工具操作。
 

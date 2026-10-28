@@ -1,9 +1,12 @@
+export type LocalAgentPermission = 'agent:execute' | 'tasks:read';
+
 /** Local settings projection. This does not expose bearer credentials or native session ids. */
 export interface LocalAgentConnection {
   id: string;
   name: string;
   clientId?: string;
   createVisibleSessions?: boolean;
+  permissions?: LocalAgentPermission[];
 }
 
 export interface LocalAgentSettingsApi {

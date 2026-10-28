@@ -9,7 +9,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { LocalAgentModel } from './catalog.js';
 import { atomicWriteFileSync, readAtomicFileSync } from '../utils/atomicWriteFile.js';
-import type { LocalAgentInstanceInfo } from '../../shared/localAgent.js';
+import type { LocalAgentInstanceInfo, LocalAgentPermission } from '../../shared/localAgent.js';
+import {
+  OBSERVATION_METHODS,
+  LocalAgentObservationError,
+  type LocalAgentObservation,
+  type ObservationMethod,
+} from './observation.js';
 
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_EVENTS = 8 * 1024 * 1024;
@@ -69,11 +75,13 @@ interface Grant {
   client: LocalAgentClientIdentity;
   legacyRuntime: boolean;
   createVisibleSessions?: boolean;
+  permissions: LocalAgentPermission[];
 }
 interface Pair {
   id: string;
   claim: string;
   client: LocalAgentClientIdentity;
+  permissions: LocalAgentPermission[];
   scope: string;
   expires: number;
   state: 'waiting' | 'approved' | 'denied';
@@ -106,7 +114,8 @@ export interface LocalAgentServerDeps {
   instanceInfo?: Readonly<LocalAgentInstanceInfo>;
   scope(): string;
   models(): Promise<LocalAgentModel[]>;
-  approve(signal: AbortSignal, client: LocalAgentClientIdentity): Promise<boolean>;
+  approve(signal: AbortSignal, client: LocalAgentClientIdentity, permissions: readonly LocalAgentPermission[]): Promise<boolean>;
+  observation?: LocalAgentObservation;
   open(
     input: LocalAgentOpen,
     bridge: { url: string; token: string; emit(event: unknown): void },
@@ -150,6 +159,16 @@ function clientIdentity(value: unknown): LocalAgentClientIdentity {
     ...(client.version !== undefined ? { version: displayText(client.version, 64) } : {}),
   };
 }
+function requestedPermissions(value: unknown): LocalAgentPermission[] {
+  // Omitted permissions retain execution-only v1 behavior; explicit read access never implies execution.
+  if (value === undefined) return ['agent:execute'];
+  if (!Array.isArray(value) || value.length < 1 || value.length > 2 ||
+    value.some((entry) => entry !== 'agent:execute' && entry !== 'tasks:read') ||
+    new Set(value).size !== value.length) {
+    throw new LocalAgentError('INVALID_REQUEST', 'Invalid local application permissions.');
+  }
+  return [...value] as LocalAgentPermission[];
+}
 async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let bytes = 0;
@@ -180,7 +199,7 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
   await fs.mkdir(deps.directory, { recursive: true, mode: 0o700 });
   const grantFile = path.join(deps.directory, 'grants.json');
   let grants: Grant[] = [];
-  let legacyStore: string | undefined;
+  let migrationBackup: { contents: string; version: 1 | 2 } | undefined;
   let bindings: Record<string, { owner: string; model: string; native: string }> = {};
   try {
     const stat = await fs.stat(grantFile).catch((error) => {
@@ -193,7 +212,7 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
       throw new LocalAgentError('GRANT_STORE_INVALID', '本机应用授权记录无法读取。');
     const saved = record(JSON.parse(original));
     if (
-      ![1, 2].includes(saved.version as number) ||
+      ![1, 2, 3].includes(saved.version as number) ||
       !Array.isArray(saved.grants) ||
       saved.grants.length > 32
     )
@@ -216,6 +235,9 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
         client,
         legacyRuntime: saved.version === 1 || g.legacyRuntime === true,
         ...(g.createVisibleSessions === true ? { createVisibleSessions: true } : {}),
+        permissions: saved.version === 3
+          ? requestedPermissions(g.permissions === undefined ? null : g.permissions)
+          : ['agent:execute'],
       };
     });
     if (saved.bindings !== undefined) {
@@ -235,7 +257,8 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
         }),
       );
     }
-    if (saved.version === 1) legacyStore = original;
+    if (saved.version === 1 || saved.version === 2)
+      migrationBackup = { contents: original, version: saved.version };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
       throw new LocalAgentError('GRANT_STORE_INVALID', '本机应用授权记录无法读取，原文件已保留。');
@@ -245,17 +268,18 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
   // A failed write must not let a revoked grant come back from disk after restart.
   let unsaved = false;
   const persist = () => {
-    const value = JSON.stringify({ version: 2, grants, bindings });
+    // v3 prevents older execution-only binaries from interpreting an observation token as execute authority.
+    const value = JSON.stringify({ version: 3, grants, bindings });
     const write = async () => {
-      if (legacyStore !== undefined) {
+      if (migrationBackup !== undefined) {
         try {
-          await fs.writeFile(`${grantFile}.v1.bak`, legacyStore, { mode: 0o600, flag: 'wx' });
+          await fs.writeFile(`${grantFile}.v${migrationBackup.version}.bak`, migrationBackup.contents, { mode: 0o600, flag: 'wx' });
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         }
       }
       atomicWriteFileSync(grantFile, value);
-      legacyStore = undefined;
+      migrationBackup = undefined;
       unsaved = false;
     };
     const result = persistence.then(write, write);
@@ -432,14 +456,25 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
     grant: Grant,
   ): Promise<unknown> => {
     assertGrant(grant);
+    if (method === 'connect/revoke') {
+      await revoke(grant.id);
+      return {};
+    }
+    if ((OBSERVATION_METHODS as readonly string[]).includes(method)) {
+      if (!grant.permissions.includes('tasks:read'))
+        throw new LocalAgentError('PERMISSION_REQUIRED', 'This connection has not been granted task observation.');
+      if (!deps.observation)
+        throw new LocalAgentError('METHOD_UNSUPPORTED', 'Task observation is unavailable in this Cindy host.');
+      const result = await deps.observation.read(method as ObservationMethod, p, () => assertGrant(grant));
+      assertGrant(grant);
+      return result;
+    }
+    if (!grant.permissions.includes('agent:execute'))
+      throw new LocalAgentError('PERMISSION_REQUIRED', 'This read-only connection cannot execute or control Agent sessions.');
     if (method === 'models') {
       const models = await deps.models();
       assertGrant(grant);
       return { models };
-    }
-    if (method === 'connect/revoke') {
-      await revoke(grant.id);
-      return {};
     }
     if (method === 'session/open') {
       if (runs.size >= MAX_RUNS)
@@ -650,7 +685,7 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
     if (pair.approval) return pair.approval;
     pair.consent = new AbortController();
     pair.approval = (async () => {
-      const approved = await deps.approve(pair.consent!.signal, pair.client);
+      const approved = await deps.approve(pair.consent!.signal, pair.client, pair.permissions);
       if (
         closing ||
         pairs.get(pair.id) !== pair ||
@@ -665,6 +700,7 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
           name: pair.client.name,
           client: pair.client,
           legacyRuntime: false,
+          permissions: [...pair.permissions],
           hash: hash(secret),
           scope: pair.scope,
         };
@@ -812,6 +848,8 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
               individualRevocation: true,
               toolPolicy: true,
               nativeReadOnly: false,
+              scopedPermissions: true,
+              ...(deps.observation ? { taskObservation: 1 } : {}),
             },
             methods: [
               'models',
@@ -824,6 +862,7 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
               'tool/reply',
               'session/close',
               'connect/revoke',
+              ...(deps.observation ? OBSERVATION_METHODS : []),
             ],
           },
         });
@@ -832,10 +871,14 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
       if (method === 'connect/start') {
         if (pairs.size >= 8) throw new LocalAgentError('BUSY', '连接申请过多，请稍后再试。');
         const client = clientIdentity(params.client);
+        const permissions = requestedPermissions(params.permissions);
+        if (permissions.includes('tasks:read') && !deps.observation)
+          throw new LocalAgentError('METHOD_UNSUPPORTED', 'Task observation is unavailable in this Cindy host.');
         const pair: Pair = {
           id: token(),
           claim: token(),
           client,
+          permissions,
           scope: deps.scope(),
           expires: Date.now() + PAIR_TTL,
           state: 'waiting',
@@ -863,12 +906,12 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
           return;
         }
         json(res, 200, {
-          result: { state: pair.state, ...(pair.secret ? { token: pair.secret } : {}) },
+          result: { state: pair.state, ...(pair.secret ? { token: pair.secret, permissions: [...pair.grant!.permissions] } : {}) },
         });
         return;
       }
       const grant = authorize(req);
-      if (method === 'events' || method === 'models') {
+      if (method === 'events' || method === 'models' || (OBSERVATION_METHODS as readonly string[]).includes(method)) {
         json(res, 200, { result: await operation(method, params, grant) });
         return;
       }
@@ -899,7 +942,7 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
       }
       json(res, 200, { result: await dedup.get(key)!.result });
     } catch (error) {
-      const known = error instanceof LocalAgentError;
+      const known = error instanceof LocalAgentError || error instanceof LocalAgentObservationError;
       const code = known ? error.code : 'LOCAL_AGENT_FAILED';
       deps.warn(code);
       json(res, code === 'UNAUTHORIZED' || code === 'FORBIDDEN' ? 403 : 400, {
@@ -964,6 +1007,7 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
           id: g.id,
           name: g.name,
           clientId: g.client.id,
+          permissions: [...g.permissions],
           ...(g.createVisibleSessions === true ? { createVisibleSessions: true } : {}),
         })),
     setCreateVisibleSessions(connectionId: string, enabled: boolean) {

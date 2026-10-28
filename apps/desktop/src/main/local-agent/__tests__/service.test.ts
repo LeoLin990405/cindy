@@ -73,6 +73,7 @@ vi.mock('../../maker-host/createDesktopProviderService.js', () => ({
 }));
 vi.mock('../../logger.js', () => ({ createLogger: () => ({ warn: vi.fn() }) }));
 vi.mock('../runtime.js', () => ({ openLocalAgentRuntime: vi.fn() }));
+vi.mock('../observationHost.js', () => ({ createLocalAgentObservationHost: vi.fn(() => ({ read: vi.fn() })) }));
 vi.mock('../server.js', () => ({
   LocalAgentError: class extends Error {
     constructor(
