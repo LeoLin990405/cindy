@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DL_HISTORY_MESSAGES_CHANNEL } from '@cindy/device-link';
+import { getDeviceLinkInvokeContext } from '../../../device-link/invoke-context.js';
+vi.mock('../../../device-link/invoke-context.js', () => ({ getDeviceLinkInvokeContext: vi.fn(() => null) }));
 
 const handlers = new Map<string, (...args: unknown[]) => unknown>();
 
@@ -37,6 +39,7 @@ describe('local-db:history:messages', () => {
   beforeEach(() => {
     handlers.clear();
     vi.clearAllMocks();
+    vi.mocked(getDeviceLinkInvokeContext).mockReturnValue(null);
   });
 
   it('validates and forwards the complete single-session history contract', async () => {
@@ -66,6 +69,54 @@ describe('local-db:history:messages', () => {
       cursor: { createdAt: 700, id: 'message-7' },
       order: 'asc',
     });
+  });
+
+  // Observation contract gap: raw history neither enforced clear visibility nor detected
+  // mutation between reads. Public IPC unit tier; two different source witnesses are the
+  // smallest failure. Legacy requests below remain unchanged; no live data or real waits.
+  it('opts into clear visibility and returns a mutation-checked state without reading bodies for state-only requests', async () => {
+    const getMessages = vi.fn(async () => ({ items: [], nextCursor: null, hasMore: false }));
+    const readTerminal = vi.fn(async () => undefined);
+    register({ sessionExists: async () => true, getMessages, readTerminal,
+      observationState: async () => ({ sourceRevision: 'revision', clearedAt: 500 }) });
+    const handler = handlers.get(DL_HISTORY_MESSAGES_CHANNEL)!;
+    const query = { ...request, includeRewound: false, observation: {} };
+    expect(await handler({}, query)).toMatchObject({ coherence: 'db-change-counter-v1', sourceRevision: 'revision', clearedAt: 500 });
+    expect(getMessages).toHaveBeenCalledWith(expect.objectContaining({ includeRewound: false, respectClearedAt: true }));
+    expect(await handler({}, { ...query, observation: { stateOnly: true, expectedRevision: 'revision' } }))
+      .toMatchObject({ items: [], hasMore: false, sourceRevision: 'revision', clearedAt: 500 });
+    expect(getMessages).toHaveBeenCalledTimes(1);
+    expect(readTerminal).toHaveBeenCalledTimes(1);
+    await expect(handler({}, { ...query, observation: { expectedRevision: 'old' } })).rejects.toThrow('[HISTORY_CHANGED]');
+    expect(getMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { sourceRevision: 'changed', clearedAt: null },
+    { sourceRevision: 'initial', clearedAt: 500 },
+  ])('withholds a page when its source witness or clear boundary changes: %j', async changed => {
+    let state: { sourceRevision: string; clearedAt: number | null } = { sourceRevision: 'initial', clearedAt: null };
+    register({ sessionExists: async () => true, observationState: async () => state,
+      getMessages: async () => { state = changed; return { items: [], nextCursor: null, hasMore: false }; } });
+    await expect(handlers.get(DL_HISTORY_MESSAGES_CHANNEL)!({}, { ...request, includeRewound: false, observation: {} }))
+      .rejects.toThrow('[HISTORY_CHANGED]');
+  });
+
+  it('refuses unsupported coherence and shared-guest database witnesses without changing legacy access', async () => {
+    const getMessages = vi.fn(async () => ({ items: [], nextCursor: null, hasMore: false }));
+    register({ sessionExists: async () => true, getMessages });
+    const handler = handlers.get(DL_HISTORY_MESSAGES_CHANNEL)!;
+    const query = { ...request, includeRewound: false, observation: {} };
+    await expect(handler({}, query)).rejects.toThrow('[COHERENCE_UNSUPPORTED]');
+    vi.mocked(getDeviceLinkInvokeContext).mockReturnValue({ sharedTask: {} } as any);
+    await expect(handler({}, query)).rejects.toThrow('[COHERENCE_UNSUPPORTED]');
+    expect(getMessages).not.toHaveBeenCalled();
+    await handler({}, request);
+    expect(getMessages).toHaveBeenCalledTimes(1);
+    for (const observation of [{ stateOnly: 'yes' }, { expectedRevision: '' }, { arbitrary: true }])
+      await expect(handler({}, { ...query, observation })).rejects.toThrow('[INVALID_PARAMS]');
+    await expect(handler({}, { ...request, observation: {} })).rejects.toThrow('[INVALID_PARAMS]');
+    expect(getMessages).toHaveBeenCalledTimes(1);
   });
 
   it('distinguishes an existing empty session from a missing session', async () => {

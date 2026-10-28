@@ -15,6 +15,7 @@ function queuedItem(
   return {
     clientId,
     text: `text-${clientId}`,
+    originalSyntheticTrigger: null,
     persistedContent: `text-${clientId}`,
     model: 'gpt-5.6',
     effort: 'medium',

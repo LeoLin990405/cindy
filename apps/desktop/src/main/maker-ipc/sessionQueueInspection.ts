@@ -4,6 +4,7 @@
  */
 
 import type { AgentInputQueuedMessage } from '../../shared/agentInputQueue.js';
+import { isSyntheticTriggerText } from '@cindy/maker-shared/synthetic-trigger';
 
 export interface SessionQueueInspectionEntry {
   queuedMessageId: string;
@@ -14,6 +15,8 @@ export interface SessionQueueInspectionEntry {
   content: string;
   /** Host-stamped visibility survives text rewrites; never infer authorship from plain text. */
   hidden?: true;
+  /** Old restored inputs may have lost their frozen ordinary/synthetic receipt. */
+  provenanceUnknown?: true;
   consuming: boolean;
 }
 
@@ -64,6 +67,7 @@ export function projectSessionQueueForInspection(
   const append = (item: AgentInputQueuedMessage, consuming: boolean): void => {
     if (seen.has(item.clientId)) return;
     seen.add(item.clientId);
+    const hidden = item.autoResume === true || !!item.originalSyntheticTrigger || isSyntheticTriggerText(item.text);
     result.push({
       queuedMessageId: item.clientId,
       position: result.length,
@@ -74,7 +78,7 @@ export function projectSessionQueueForInspection(
         item.origin?.kind === 'orca' || item.origin?.kind === 'session'
           ? (item.origin.displayText ?? item.text)
           : item.text,
-      ...(item.autoResume === true || item.originalSyntheticTrigger ? { hidden: true as const } : {}),
+      ...(hidden ? { hidden: true as const } : item.originalSyntheticTrigger !== null ? { provenanceUnknown: true as const } : {}),
       consuming,
     });
   };

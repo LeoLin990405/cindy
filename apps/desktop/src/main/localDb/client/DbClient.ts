@@ -1,5 +1,6 @@
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
 
 import { createLogger } from '../../logger.js';
 import { ensureReady, getDrizzle, getRawDb } from '../index.js';
@@ -15,7 +16,37 @@ import { tx as runInprocTx } from '../worker/opHandlers/tx.js';
 import type { LocalWorktreeReference } from '../worker/worktreeReferences.js';
 import { readLocalWorktreeReferences } from '../worker/worktreeReferences.js';
 
+// Connection-local writes (including edit/restore ABA) and other connections' commits.
+const HISTORY_REVISION_SQL =
+  'SELECT total_changes() AS changes, data_version AS version, schema_version AS schemaVersion '
+  + 'FROM pragma_data_version, pragma_schema_version';
+const inprocConnectionNonces = new WeakMap<object, string>();
+
+function historyChanged(): Error & { code: 'HISTORY_CHANGED' } {
+  return Object.assign(new Error('history revision connection changed'), {
+    code: 'HISTORY_CHANGED' as const,
+  });
+}
+
+function historyRevision(nonce: string, row: unknown): string {
+  const counters = row as { changes?: unknown; version?: unknown; schemaVersion?: unknown } | undefined;
+  if (
+    !counters
+    || typeof counters.changes !== 'number' || !Number.isSafeInteger(counters.changes)
+    || typeof counters.version !== 'number' || !Number.isSafeInteger(counters.version)
+    || typeof counters.schemaVersion !== 'number' || !Number.isSafeInteger(counters.schemaVersion)
+    || counters.changes < 0 || counters.version < 0 || counters.schemaVersion < 0
+  ) {
+    throw Object.assign(new Error('history revision counters unavailable or invalid'), {
+      code: 'HISTORY_REVISION_UNAVAILABLE',
+    });
+  }
+  return `${nonce}:${counters.changes}:${counters.version}:${counters.schemaVersion}`;
+}
+
 export interface DbClient {
+  /** Opaque connection-bound witness; absent on legacy clients. Never substitute a constant. */
+  readHistoryRevision?(): Promise<string>;
   /** Optional only for legacy transports; callers must preserve on absence. */
   readLocalWorktreeReferences?(): Promise<LocalWorktreeReference[]>;
   query<T = unknown>(sql: string, params?: unknown[]): Promise<T[]>;
@@ -56,6 +87,7 @@ export async function createDbClient(opts: CreateDbClientOptions = {}): Promise<
 
   const kind = resolveTransportKind(opts.transport);
   let transport = createTransport(kind, opts);
+  let transportNonce = randomUUID();
   const boundary = new DbErrorBoundary();
   let disposed = false;
   let unavailableError: Error | null = null;
@@ -75,6 +107,7 @@ export async function createDbClient(opts: CreateDbClientOptions = {}): Promise<
       const { shouldRestart } = boundary.onWorkerTerminated(info);
       if (shouldRestart && kind === 'worker-thread') {
         transport = createTransport(kind, opts);
+        transportNonce = randomUUID();
         bindTransportEvents();
         rebindTerminationHandler();
       } else {
@@ -85,6 +118,19 @@ export async function createDbClient(opts: CreateDbClientOptions = {}): Promise<
   rebindTerminationHandler();
 
   const client: DbClient = {
+    readHistoryRevision: async () => {
+      const current = transport;
+      const nonce = transportNonce;
+      try {
+        const row = await withTransport('queryOne', () =>
+          current.send('queryOne', { sql: HISTORY_REVISION_SQL, params: [] }));
+        if (current !== transport || disposed || unavailableError) throw historyChanged();
+        return historyRevision(nonce, row);
+      } catch (error) {
+        if (current !== transport || disposed || unavailableError) throw historyChanged();
+        throw error;
+      }
+    },
     readLocalWorktreeReferences: () =>
       withTransport('worktreeReferences', () => transport.send('worktreeReferences')),
     query: (sql, params) =>
@@ -123,6 +169,18 @@ export async function createInprocDbClient(opts: CreateDbClientOptions = {}): Pr
   }
 
   return {
+    readHistoryRevision: async () => {
+      // The lifecycle may replace the raw handle without replacing this client.
+      const db = getRawDb();
+      let nonce = inprocConnectionNonces.get(db);
+      if (!nonce) {
+        nonce = randomUUID();
+        inprocConnectionNonces.set(db, nonce);
+      }
+      const row = db.prepare(HISTORY_REVISION_SQL).get();
+      if (db !== getRawDb()) throw historyChanged();
+      return historyRevision(nonce, row);
+    },
     readLocalWorktreeReferences: async () =>
       readLocalWorktreeReferences(getRawDb(), Database, opts.nativeBinding),
     query: async <T = unknown>(sql: string, params: unknown[] = []) =>

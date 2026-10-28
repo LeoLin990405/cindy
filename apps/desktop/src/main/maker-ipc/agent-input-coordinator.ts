@@ -86,6 +86,7 @@ import {
   USAGE_LIMIT_RESET_AUTO_RESUME_REASON,
 } from '../../shared/agentInputQueue.js';
 import { CONTINUE_AFTER_ERROR_PROMPT, syntheticTriggerKind } from '../../shared/interruptedTurn.js';
+import { extractPlainText } from './agentHandoff.js';
 import { isSyntheticTriggerText } from '@cindy/maker-shared/synthetic-trigger';
 import { attachSessionReferenceMetadata } from '../../shared/sessionReferenceMetadata.js';
 import { collectInlineMessageReferenceKeys } from '@cindy/maker-shared/agent-input-projection';
@@ -280,6 +281,7 @@ export interface AgentInputSendOpts {
     sharedTaskAuthor?: AgentInputQueuedMessage['sharedTaskAuthor'];
     /** 插件来源:写入 agentMeta.sourcePlugin 并生成 `[消息来源]`(不传给 maker-core)。 */
     sourcePlugin?: AgentInputQueuedMessage['sourcePlugin'];
+    originalSyntheticTrigger?: AgentInputQueuedMessage['originalSyntheticTrigger'];
     clientId: string;
     content: string;
     /** Overflow 重放用的 agent-facing wire payload（mention / 标注附件等）。 */
@@ -1004,12 +1006,19 @@ export function isMatchingFencedStaleTerminal(
 }
 /**
  * 首次进入 main 队列边界时冻结原始合成指令意图。IPC payload 属不可信输入，
- * 因此即使 renderer 带了同名字段也必须从当下原始 text 重新计算。
+ * 因此即使 renderer 带了同名字段也必须从原始正文与 Main 隐藏标记重新计算。
  */
+function readOriginalSyntheticTrigger(item: AgentInputQueuedMessage): 'continue' | 'generic' | null {
+  return syntheticTriggerKind(item.text)
+    // Do not reinterpret an ordinary user's literal JSON as a display envelope.
+    ?? (item.persistedContent !== item.text ? syntheticTriggerKind(extractPlainText(item.persistedContent)) : null)
+    ?? (item.agentOmitsTriggerPrefix === true ? 'generic' : null);
+}
+
 function captureOriginalSyntheticTrigger(item: AgentInputQueuedMessage): AgentInputQueuedMessage {
   return {
     ...item,
-    originalSyntheticTrigger: syntheticTriggerKind(item.text) ?? undefined,
+    originalSyntheticTrigger: readOriginalSyntheticTrigger(item),
   };
 }
 
@@ -1035,10 +1044,12 @@ function stampHostAcceptedAt(
  * 快照则保留首次入队时冻结的值，因为正文可能已经被 Ghost rewrite。
  */
 function normalizeRestoredSyntheticTrigger(item: AgentInputQueuedMessage): AgentInputQueuedMessage {
-  if (item.originalSyntheticTrigger === 'continue' || item.originalSyntheticTrigger === 'generic') {
+  if (item.originalSyntheticTrigger === 'continue' || item.originalSyntheticTrigger === 'generic'
+    || item.originalSyntheticTrigger === null) {
     return item;
   }
-  return captureOriginalSyntheticTrigger(item);
+  // Without a surviving prefix/host marker, legacy provenance stays unknown.
+  return { ...item, originalSyntheticTrigger: readOriginalSyntheticTrigger(item) ?? undefined };
 }
 
 type PersistAcceptedUserMessageResult = 'persisted' | 'stale' | 'failed';
@@ -5164,6 +5175,8 @@ export class AgentInputCoordinator {
           ...(head.sourcePlugin ? { sourcePlugin: head.sourcePlugin } : {}),
           clientId: head.clientId,
           content: head.persistedContent,
+          ...(head.originalSyntheticTrigger !== undefined
+            ? { originalSyntheticTrigger: head.originalSyntheticTrigger } : {}),
           agentFacingWireContent: makerUserMessage,
           sdkSessionId,
           delivery: active.delivery,
@@ -7312,6 +7325,8 @@ export class AgentInputCoordinator {
           content: item.persistedContent,
           agentMeta: {
             uuid: active.messageUuid,
+            ...(item.originalSyntheticTrigger !== undefined
+              ? { originalSyntheticTrigger: item.originalSyntheticTrigger } : {}),
             ...(item.sharedTaskAuthor ? { sharedTaskAuthor: item.sharedTaskAuthor } : {}),
             // 来源标签数据(同 drain 落库口径;只用于归属展示,不是权限判据)。
             ...(item.sourceDevice ? { sourceDevice: item.sourceDevice } : {}),

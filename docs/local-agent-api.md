@@ -59,7 +59,7 @@ node scripts/examples/local-agent-client.mjs --connection-code "cindy-local:v1:<
 
 成功为 `{"result":...}`，失败为 `{"error":{"code":"...","message":"..."}}`；错误的 `code` 用于程序判断，`message` 用于展示。RPC 不使用 JSON-RPC 的 `jsonrpc` 字段。Host 必须为发现的 loopback 地址，任何带 Origin 的请求都拒绝；这是供本机进程使用的接口，不开放浏览器 CORS。
 
-`capabilities` 无需授权，返回 `protocol`、Cindy `version`、`instance`、可用 `methods` 和 `features`。当前通用扩展声明 `clientIdentity`、`isolatedSessions`、`individualRevocation`、`toolPolicy`、`scopedPermissions` 为 true；装配只读任务观察时另声明 `taskObservation: 1`。`nativeReadOnly` 仍为 false：任务观察只读不代表原生执行具有只读文件沙箱。能力声明不等于调用方已获授权。未声明的能力不得假定支持。`instance` 保持可选以兼容早期 v1 客户端，新客户端应始终携带；实例改变后重新发现，不自动重放旧操作。
+`capabilities` 无需授权，返回 `protocol`、Cindy `version`、`instance`、可用 `methods` 和 `features`。当前通用扩展声明 `clientIdentity`、`isolatedSessions`、`individualRevocation`、`toolPolicy`、`scopedPermissions` 为 true；装配只读任务观察时另声明 `taskObservation: 1`、`historyCoherence: 1`。`nativeReadOnly` 仍为 false：任务观察只读不代表原生执行具有只读文件沙箱。能力声明不等于调用方已获授权。未声明的能力不得假定支持。`instance` 保持可选以兼容早期 v1 客户端，新客户端应始终携带；实例改变后重新发现，不自动重放旧操作。
 
 有副作用的请求编号必须是 `<process-nonce>:<counter>`，nonce 为 8–64 位 `[A-Za-z0-9_-]`，counter 从 1 单调递增、最多 15 位。去重按**授权 + 完整请求编号**计算，同编号不同 payload 拒绝；每个进程保留最近 256 个编号的窗口，已过期请求拒绝执行，不重新提交。重启后用新 nonce，不依赖旧实例的去重记录。每个授权最多同时保留 32 个进程 nonce（全部授权合计 128 个）；名额用满时，空闲超过 10 分钟的 nonce 会被回收，之后再用该 nonce 的请求返回 `REQUEST_EXPIRED` 且不执行，仍无可回收名额时返回 `CLIENT_LIMIT`。网络超时表示结果可能未知；任何消息、工具副作用或控制请求都不能用新编号自动重试。
 
@@ -87,7 +87,7 @@ node scripts/examples/local-agent-client.mjs --connection-code "cindy-local:v1:<
 |---|---|---|
 | `observation/devices` | `{limit?,cursor?}` | 授权电脑分页，含可用性和不可用原因；不启用远控 |
 | `observation/sessions` | `{deviceId?,limit?,cursor?,order?,workdir?,fromMs?,toMs?,agentKind?}` | 单台电脑既有任务分页与宿主生成的任务链接；不包含已删除任务 |
-| `observation/history` | `{deviceId?,sessionId,limit?,cursor?,order?,workdir?,fromMs?,toMs?,agentKind?}` | 单个任务可见问答分页；不含工具、思考、已 rewind 内容或任意 agentMeta |
+| `observation/history` | `{deviceId?,sessionId,limit?,cursor?,expectedRevision?,order?,workdir?,fromMs?,toMs?,agentKind?}` | 单个任务可见问答分页；排除清空边界及之前、工具、思考、已 rewind 内容或任意 agentMeta |
 | `observation/inspect` | `{deviceId?,sessionIds}` | 最多 32 个明确目标的运行态与有界队列快照 |
 
 `deviceId` 默认 `local`；远端只接受设备列表中的精确 id，不接受 `all` 或转发到第三台电脑。
@@ -98,12 +98,22 @@ cc/codex/pi。下一页原样提交 `nextCursor`；游标绑定方法、设备�
 从所需起点重新读取，不将旧游标视为仍有效。
 
 分页结果分别使用 `devices`、`sessions`、`messages` 数组，以及 `hasMore`、`nextCursor`；
-设备页额外声明 `consistency:'live'`，不是快照。读取结果包含 `observedAt` 与 `partial`。
+设备页声明 `consistency:'live'`；任务目录同样是 live，并固定 `captureComplete:false`，不是原子全量清单。
+目录行有 `clearBoundaryKnown`；只有确实取得源字段才返回 `clearedAt`（毫秒数或 null）。
+旧源遗漏字段为 unknown，不补 null；此时目录 `partial:true`。`messageCount` 不是可见问答数或
+一致性凭据，可能含清空前保留的记录。读取结果包含 `observedAt` 与 `partial`。
 历史只交付正文文本，不下载附件；每条最多 8,000 字符，整批共享 12,000 字符预算。
 源端已截断、结构化内容超限或可见媒体未交付时保留 `truncated:true`／`partial:true`，
 不能声称拿到了完整要求，也不返回用于判定截断的内部 agentMeta。隐藏的合成续跑／UI 指令
 不作为用户问答返回；队列仍保留真实计数和位置，但合成指令正文为空并标记 hidden/truncated。
 该判定保留 Main 捕获的 autoResume／原始合成意图，不只检查可能已改写的正文前缀。
+新的 Main 输入在改写前冻结 `originalSyntheticTrigger`：合成种类表示隐藏，显式 null 才表示
+确知的普通输入；该值经发送事务保存在内部历史元数据，观察接口不导出元数据。
+旧记录／恢复队列没有该依据时，不能从普通文字反推为真人输入：历史省略其 user 正文并返回
+`unknownInputProvenance:true`／`partial:true`；队列正文为空、`provenanceUnknown:true`／truncated，
+计数、顺序和 consuming 保留。已丢失的旧标记不做猜测回填；这会限制历史覆盖，不能声称完整旧问答。
+分页为空也可能只是本页输入被过滤；必须继续遵循 hasMore／nextCursor，并汇总**所有页**的 partial
+与 unknown 标记，不用最后一页的 false 覆盖先前的不完整。
 `queue.count` 是检查投影总条数，包含 consuming 条目，不等于纯等待 backlog；items 已截断时，
 不能由可见条目推算完整的等待／正在投递数量。
 远端复用既有单任务历史通道的结构保留模式，先保留正文类型再过滤，不复用会先拍平
@@ -127,6 +137,37 @@ running/idle/not-active/unknown；本机 v2 运行时缺席只证明 not-active�
 撤销停止该授权的读取，不关闭被观察的既有任务；另一个应用的授权不受影响。读取不进入执行结果
 去重缓存，重复读取会重新检查授权并取得新的观察结果。native-read-only 文件执行仍不受此声明支持。
 真实授权、安装版能力、跨电脑可达性与源数据完整性须分别验收；源码或测试通过不代表已经部署。
+
+### 历史清空与跨页一致性（`historyCoherence: 1`）
+
+调用方须同时检查 `taskObservation:1` 和 `historyCoherence:1`；前者单独存在不证明一致性支持。
+历史在 SQL 读取时执行 `rewindAt IS NULL`、未删除任务，以及
+`clearedAt IS NULL OR messages.createdAt > sessions.clearedAt`，不是事后只按时间高水位补新行。
+成功页返回 `clearedAt`、不透明 `sourceRevision`、`consistency:'mutation-checked'`、`snapshot:false`。
+新清空边界意味着撤回之前已采集的对应旧证据；更新、rewind、删除同样不能按 append-only 合并。
+目录的清空字段未知、读取失败或旧快照不能证明没有清空，更不能据此重新发布已撤回内容。
+
+这是保守的乐观检查，不持有数据库事务、任务锁或可恢复快照：在读取前后核对实际连接代次、
+SQLite `total_changes`／`data_version`／`schema_version`；工作线程重启、原始连接替换、账号库
+切换均更换依据。同长度修改、改回原文、rewind、清空和其他连接提交不能靠相同条数／时间戳蒙混。
+见证值覆盖整个账号数据库，所以**其他任务或元数据写入也会失效本次采集**；繁忙源不保证可完成。
+游标除查询和位置外还绑定源 revision；同一采集各页必须 revision 相同。可省略游标、携带
+`expectedRevision` 做一次新的有界复核；与游标中的 revision 矛盾则为 `INVALID_CURSOR`。
+
+- `HISTORY_CHANGED`：窗口中有变化／重启。丢弃本次拼接的全部页和游标，从所需起点按明确预算重取；
+  不保留旧页再续新代次，不无界自动重试。预算用尽保留 partial／unknown，不声称采集完整。
+- `COHERENCE_UNSUPPORTED`：源端不支持连接见证或仍是忽略新选项的旧版。不能降级为原始历史或凭
+  空页声称完整；需升级兼容源端后重试。源能力和本机入口能力要分别判断。
+- 已删除／缺失目标仍为 `NOT_FOUND`；不能当作空历史或继续使用缓存正文。
+
+跨机复用既有单任务历史通道的可选 `observation` 参数，源端保留结构并执行清空过滤、前后检查；
+控制端异步复核元数据及最后的设备目录资格之后，再用同通道的 `stateOnly` 读检查该源 revision；
+它是交付前最后一个异步读取，之后只做同步的授权复核、时间和体积检查。旧请求省略此参数
+保持原语义。见证不向共享任务访客开放，避免泄露账号级写入活动；原访客历史访问不变。
+无新增 channel、数据库 schema、持久 revision／任务登记表、凭证或执行权限。
+即使所有页耗尽且无截断，也只证明本次查询在最后见证时未检测到变更，不是持续有效、跨任务／
+跨电脑的原子快照；调用方发布、刷新及撤回策略仍须保留来源、范围和时效，不用 `hasMore:false`
+宣称所有任务或设备完整，也不把 SQLite 见证当作内存运行态或队列的 revision。
 
 ### 在 Cindy 中创建可见任务
 

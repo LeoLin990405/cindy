@@ -24,7 +24,8 @@ export type ObservationSessionsParams = Omit<ListSessionsParams, 'cursor'> & {
 export interface ObservationDeps {
   listDevices(assertCurrent: () => void): Promise<unknown>;
   sessions(deviceId: string, args: ObservationSessionsParams, assertCurrent: () => void): Promise<unknown>;
-  history(deviceId: string, sessionId: string, args: GetMessagesParams, assertCurrent: () => void): Promise<unknown>;
+  history(deviceId: string, sessionId: string, args: GetMessagesParams & { expectedRevision?: string }, assertCurrent: () => void): Promise<unknown>;
+  validateHistory(deviceId: string, sessionId: string, state: { sourceRevision: string; clearedAt: number | null }, assertCurrent: () => void): Promise<void>;
   runtime(deviceId: string, sessionIds: string[], assertCurrent: () => void): Promise<unknown>;
   /** Must be a side-effect-free snapshot: never restore queues or dispatch inputs. */
   readLocalQueue?(sessionId: string): readonly SessionQueueInspectionEntry[] | null | undefined;
@@ -128,13 +129,19 @@ export function createLocalAgentObservation(deps: ObservationDeps): LocalAgentOb
       const deliver = async (result: Record<string, unknown>) => {
         assertCurrent();
         if (method !== 'observation/devices' && deviceId !== 'local') await assertDeviceEligible();
+        // Source validation is the last asynchronous read, after device-directory eligibility.
+        if (method === 'observation/history') await checked(() => deps.validateHistory(deviceId,
+          identifier(result.sessionId, 'INVALID_RESPONSE'), { sourceRevision: identifier(result.sourceRevision, 'INVALID_RESPONSE'),
+            clearedAt: result.clearedAt as number | null }, assertCurrent));
+        result.observedAt = Date.now();
         if (Buffer.byteLength(JSON.stringify(result)) > 131072) return fail('RESPONSE_TOO_LARGE');
         assertCurrent();
         return result;
       };
       if (!OBSERVATION_METHODS.includes(method)) return fail('METHOD_NOT_FOUND');
       const allowed = method === 'observation/devices' ? ['limit', 'cursor'] : method === 'observation/inspect'
-        ? ['deviceId', 'sessionIds'] : ['deviceId', 'sessionId', 'limit', 'cursor', 'order', 'workdir', 'fromMs', 'toMs', 'agentKind'];
+        ? ['deviceId', 'sessionIds'] : ['deviceId', 'sessionId', 'limit', 'cursor', 'order', 'workdir', 'fromMs', 'toMs', 'agentKind',
+          ...(method === 'observation/history' ? ['expectedRevision'] : [])];
       if (Object.keys(params).some((k) => !allowed.includes(k))) return fail('INVALID_PARAMS');
       const deviceId = params.deviceId === undefined ? 'local' : identifier(params.deviceId);
       const loadDevices = async (): Promise<ObservationDevice[]> => {
@@ -198,12 +205,14 @@ export function createLocalAgentObservation(deps: ObservationDeps): LocalAgentOb
           assertCurrent();
           const items = entries?.slice(0, 20).map((entry) => {
             const hidden = entry.hidden === true || isSyntheticTriggerText(entry.content);
-            const content = hidden ? '' : entry.content.slice(0, Math.min(500, queueTextRemaining));
+            const provenanceUnknown = !hidden && entry.provenanceUnknown === true;
+            const content = hidden || provenanceUnknown ? '' : entry.content.slice(0, Math.min(500, queueTextRemaining));
             queueTextRemaining -= content.length;
             return { queuedMessageId: identifier(entry.queuedMessageId, 'INVALID_RESPONSE'), position: entry.position,
               source: entry.source, sourceLabel: entry.sourceLabel?.slice(0, 256) ?? null,
               enqueuedAtMs: entry.enqueuedAtMs, consuming: entry.consuming,
-              content, ...(hidden ? { hidden: true } : {}), truncated: hidden || content.length < entry.content.length };
+              content, ...(hidden ? { hidden: true } : {}), ...(provenanceUnknown ? { provenanceUnknown: true } : {}),
+              truncated: hidden || provenanceUnknown || content.length < entry.content.length };
           });
           const truncated = !!entries && (entries.length > 20 || !!items?.some((item) => item.truncated));
           const queue = !supported ? { status: 'unsupported' } : !entries ? { status: 'unavailable' }
@@ -228,9 +237,18 @@ export function createLocalAgentObservation(deps: ObservationDeps): LocalAgentOb
       if (method === 'observation/sessions' && params.sessionId !== undefined) return fail('INVALID_PARAMS');
       const binding = JSON.stringify([method, deviceId, sessionId, order, workdir, agentKind, fromMs, toMs]);
       let cursor: unknown = null;
+      let expectedRevision = params.expectedRevision === undefined ? undefined : identifier(params.expectedRevision);
+      if (expectedRevision !== undefined && !/^[\w-]{1,256}$/.test(expectedRevision)) return fail('INVALID_PARAMS');
       if (params.cursor !== undefined) {
         try {
-          cursor = sourceCursor(decodeToken(params.cursor, binding));
+          const decoded = decodeToken(params.cursor, binding);
+          if (method === 'observation/history') {
+            const continuation = object(decoded);
+            const revision = identifier(continuation.sourceRevision, 'INVALID_CURSOR');
+            if (expectedRevision !== undefined && expectedRevision !== revision) return fail('INVALID_CURSOR');
+            expectedRevision = revision;
+            cursor = sourceCursor(continuation.position);
+          } else cursor = sourceCursor(decoded);
           if (cursor === null) return fail('INVALID_CURSOR');
         } catch { return fail('INVALID_CURSOR'); }
       }
@@ -239,10 +257,18 @@ export function createLocalAgentObservation(deps: ObservationDeps): LocalAgentOb
       const raw = method === 'observation/sessions'
         ? await checked(() => deps.sessions(deviceId, { ...args, includeDeleted: false }, assertCurrent))
         : await checked(() => deps.history(deviceId, sessionId!, { ...args, cursor: args.cursor as GetMessagesParams['cursor'], sessionIds: [sessionId!],
-          roles: ['user', 'assistant', 'ask_user', 'plan_review'], includeRewound: false }, assertCurrent));
+          roles: ['user', 'assistant', 'ask_user', 'plan_review'], includeRewound: false, respectClearedAt: true,
+          ...(expectedRevision !== undefined ? { expectedRevision } : {}) }, assertCurrent));
       const p = page(raw, Number(limit));
-      if (method === 'observation/history' && typeof p.cursor === 'string') return fail('INVALID_RESPONSE');
-      const nextCursor = p.cursor === null ? null : encodeToken(binding, p.cursor);
+      const history = method === 'observation/history' ? object(raw) : undefined;
+      if (history && (history.coherence !== 'db-change-counter-v1' || typeof history.sourceRevision !== 'string'
+        || !/^[\w-]{1,256}$/.test(history.sourceRevision)
+        || (history.clearedAt !== null && (!Number.isSafeInteger(history.clearedAt) || Number(history.clearedAt) < 0))))
+        return fail('COHERENCE_UNSUPPORTED');
+      if (history && expectedRevision !== undefined && history.sourceRevision !== expectedRevision) return fail('HISTORY_CHANGED');
+      if (history && typeof p.cursor === 'string') return fail('INVALID_RESPONSE');
+      const nextCursor = p.cursor === null ? null : encodeToken(binding, history
+        ? { position: p.cursor, sourceRevision: history.sourceRevision } : p.cursor);
       if (method === 'observation/sessions') {
         const sessions = p.items.map((r) => {
           let sessionUrl: string | undefined;
@@ -258,20 +284,35 @@ export function createLocalAgentObservation(deps: ObservationDeps): LocalAgentOb
           }
           return { sessionId: identifier(r.id, 'INVALID_RESPONSE'),
             ...metadata(r, ['title', 'workingDir', 'agentKind', 'status', 'source', 'createdAt', 'updatedAt', 'lastActivityAt', 'messageCount']),
+            clearBoundaryKnown: r.clearedAt === null || (Number.isSafeInteger(r.clearedAt) && Number(r.clearedAt) >= 0),
+            ...(r.clearedAt === null || (Number.isSafeInteger(r.clearedAt) && Number(r.clearedAt) >= 0) ? { clearedAt: r.clearedAt } : {}),
             ...(sessionUrl ? { sessionUrl } : {}) };
         });
-        return deliver({ deviceId, sessions, nextCursor, hasMore: p.hasMore, observedAt: Date.now(), partial: false });
+        return deliver({ deviceId, sessions, nextCursor, hasMore: p.hasMore, observedAt: Date.now(),
+          partial: sessions.some(row => !row.clearBoundaryKnown), consistency: 'live', captureComplete: false });
       }
-      let remaining = 12000, partial = false;
+      let remaining = 12000, partial = false, unknownInputProvenance = false;
       const messages = p.items.flatMap((r) => {
+        if (history!.clearedAt !== null && (!Number.isSafeInteger(r.createdAt) || Number(r.createdAt) <= Number(history!.clearedAt)))
+          return fail('HISTORY_CHANGED');
         if (!['user', 'assistant', 'ask_user', 'plan_review'].includes(String(r.role)) || r.rewindAt != null) { partial = true; return []; }
         const id = identifier(r.id, 'INVALID_RESPONSE');
         const original = text(r.content);
         const meta = r.agentMeta && typeof r.agentMeta === 'object' && !Array.isArray(r.agentMeta)
           ? r.agentMeta as Record<string, unknown> : null;
-        if (r.role === 'user' && (meta?.autoResume === true || isSyntheticTriggerText(original.value))) {
-          partial = true;
-          return [];
+        if (r.role === 'user') {
+          if (meta?.autoResume === true || meta?.originalSyntheticTrigger === 'continue'
+            || meta?.originalSyntheticTrigger === 'generic' || isSyntheticTriggerText(original.value)) {
+            partial = true;
+            return [];
+          }
+          // A legacy rewritten hidden instruction is indistinguishable from plain human text.
+          // Explicit null is Main's frozen ordinary-input receipt; absence is not that receipt.
+          if (meta?.originalSyntheticTrigger !== null) {
+            unknownInputProvenance = true;
+            partial = true;
+            return [];
+          }
         }
         const content = original.value.slice(0, Math.min(8000, remaining));
         remaining -= content.length;
@@ -281,7 +322,9 @@ export function createLocalAgentObservation(deps: ObservationDeps): LocalAgentOb
         partial ||= truncated;
         return [{ id, sessionId, ...metadata(r, ['clientId', 'role', 'createdAt']), text: content, truncated }];
       });
-      return deliver({ deviceId, sessionId, messages, nextCursor, hasMore: p.hasMore, observedAt: Date.now(), partial });
+      return deliver({ deviceId, sessionId, messages, nextCursor, hasMore: p.hasMore, observedAt: Date.now(), partial,
+        clearedAt: history!.clearedAt, sourceRevision: history!.sourceRevision, consistency: 'mutation-checked', snapshot: false,
+        unknownInputProvenance });
     },
   };
 }

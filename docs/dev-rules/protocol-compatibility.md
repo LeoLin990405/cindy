@@ -1,5 +1,29 @@
 # 跨端协议兼容
 
+## 本机只读观察的清空与变更见证（尚未发布）
+
+本机 Agent API 的可选能力 `historyCoherence:1` 与 `taskObservation:1` 分开声明。
+历史成功页追加 `clearedAt`、`sourceRevision`、`consistency:'mutation-checked'`、`snapshot:false`；
+游标绑定查询、位置与源 revision。`expectedRevision` 可选提交已读到的依据；检测到变化返回
+`HISTORY_CHANGED`，调用方丢弃整次采集并按预算重取，不拼接不同代次或自动无界重试。
+目录行追加 `clearBoundaryKnown` 与确知的 `clearedAt`，旧源缺字段仍为 unknown；目录固定
+`consistency:'live'`、`captureComplete:false`，耗尽分页不构成原子全量覆盖。
+
+既有 `local-db:history:messages` 追加可选 `observation:{expectedRevision?,stateOnly?}`。
+只读源端执行当前清空／回退／删除边界并在前后核对连接绑定的数据库见证；`stateOnly` 不读正文。
+共享任务访客不能请求账号数据库见证，原有不带参数的访客历史读取不变。同账号授权、allowlist、
+恢复／重试名单不变，无新 channel 或服务端变更；见证不是凭据，也不覆盖内存队列或运行态。
+
+新观察调用方须核对本机两项能力，并验证每个源的响应；旧源忽略新参数、不回见证时明确报
+`COHERENCE_UNSUPPORTED`，不回落原始历史。旧调用方省略参数继续原行为，可忽略新增目录字段。
+双方兼容升级后才具备该保证，不能把源码或本机能力等同于所有远端已更新。回退后新观察方保留
+unknown／partial；不降级授权、不新增登录或安装动作。SQLite schema、migration、用户数据和
+持久配置均不修改。Main 队列的既有 `originalSyntheticTrigger` 可选字段扩展为种类／null／缺省：
+null 表示新输入已冻结为普通输入，缺省表示旧恢复记录未知；发送事务将确知值写入已有 agentMeta JSON，
+不新增列、不猜测回填。观察方省略未知旧 user 正文并标 partial／unknown，队列只隐去未知正文，
+计数和 consuming 不变；旧显示端可忽略该元数据。完整合同见
+[本机 Agent API](../local-agent-api.md#历史清空与跨页一致性historycoherence-1)。
+
 ## 本机应用的可见任务（2026-10-28）
 
 本机 Agent API v1 的 `session/open` 响应可选追加 `cindySessionId`。应用授权记录可选

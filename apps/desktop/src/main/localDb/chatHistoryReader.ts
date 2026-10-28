@@ -204,6 +204,7 @@ export interface SessionSummary {
   parentSessionId: string | null;
   createdAt: number; // unix ms
   updatedAt: number;
+  clearedAt?: number | null;
   userSendAt: number | null;
   messageCount: number;
 }
@@ -275,6 +276,7 @@ export async function listSessionsForHistory(
       parentSessionId: sessions.parentSessionId,
       createdAt: sessions.createdAt,
       updatedAt: sessions.updatedAt,
+      clearedAt: sessions.clearedAt,
       userSendAt: sessions.userSendAt,
     })
     .from(sessions)
@@ -316,6 +318,7 @@ export async function listSessionsForHistory(
     parentSessionId: r.parentSessionId,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
+    ...(r.clearedAt !== undefined ? { clearedAt: r.clearedAt } : {}),
     userSendAt: r.userSendAt,
     messageCount: countMap.get(r.id) ?? 0,
   }));
@@ -345,6 +348,8 @@ export interface GetMessagesParams {
   agentKind: HistoryAgentKind | null;
   roles: HistoryRole[] | null;
   includeRewound: boolean;
+  /** Opt into visible history; omitted/false preserves legacy raw history. */
+  respectClearedAt?: boolean;
   limit: number;
   cursor: HistoryCursor | null; // (messages.createdAt(ms), messages.rowid); id remains for legacy cursors
   order: HistoryOrder;
@@ -426,6 +431,11 @@ export async function getMessagesForHistory(
 
   const conds = [];
   if (!params.includeRewound) conds.push(isNull(messages.rewindAt));
+  // Keep visibility on the joined query even when workdir IDs were pre-resolved.
+  if (params.respectClearedAt) {
+    conds.push(ne(sessions.status, 'deleted'));
+    conds.push(or(isNull(sessions.clearedAt), gt(messages.createdAt, sessions.clearedAt)));
+  }
   if (sessionIdsToFilter !== null && sessionIdsToFilter.length > 0) {
     conds.push(inArray(messages.sessionId, sessionIdsToFilter));
   }

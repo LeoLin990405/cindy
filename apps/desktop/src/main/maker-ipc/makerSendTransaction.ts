@@ -157,7 +157,7 @@ function canTrustDesktopPiCommand(item: AgentInputQueuedMessage): boolean {
     && (item.agentReferences?.length ?? 0) === 0
     && item.fromMobileClient !== true
     && item.autoResume !== true
-    && item.originalSyntheticTrigger === undefined
+    && item.originalSyntheticTrigger == null
     && (semanticOrigin === undefined || semanticOrigin.kind === 'desktop');
 }
 
@@ -182,7 +182,7 @@ export function stampTrustedDesktopQueuedOrigin(
   // Preserve the user's text independently of any later plugin rewrite, without granting
   // mobile inputs the separate Pi desktop-command privilege.
   delete explicitUserItem.autoReviewUserText;
-  const ordinary = !item.autoResume && item.originalSyntheticTrigger === undefined
+  const ordinary = !item.autoResume && item.originalSyntheticTrigger == null
     && (!item.origin || (item.origin as { kind: string }).kind === 'desktop');
   // Keep the complete input until the shared atomic history budget is applied.
   // Pre-compacting a revocation would leave older grants beside an omission marker.
@@ -309,6 +309,7 @@ type MakerSendOptions = {
     sharedTaskAuthor?: AgentInputQueuedMessage['sharedTaskAuthor'];
     /** 插件来源(只写入 agentMeta.sourcePlugin 并生成 `[消息来源]`,不传给 maker-core)。 */
     sourcePlugin?: unknown;
+    originalSyntheticTrigger?: AgentInputQueuedMessage['originalSyntheticTrigger'];
     clientId?: unknown;
     content?: unknown;
     agentFacingWireContent?: unknown;
@@ -635,6 +636,7 @@ function readPersistUserMessageOption(sendOpts: MakerSendOptions): {
   botTaskCoordination?: AgentInputQueuedMessage['botTaskCoordination'];
   sharedTaskAuthor?: AgentInputQueuedMessage['sharedTaskAuthor'];
   sourcePlugin?: AgentInputQueuedMessage['sourcePlugin'];
+  originalSyntheticTrigger?: AgentInputQueuedMessage['originalSyntheticTrigger'];
   clientId: string;
   content: unknown;
   agentFacingWireContent?: IpcUserMessage;
@@ -661,6 +663,9 @@ function readPersistUserMessageOption(sendOpts: MakerSendOptions): {
     ...(sourcePlugin ? { sourcePlugin } : {}),
     clientId: persist.clientId,
     content: persist.content,
+    ...(persist.originalSyntheticTrigger === 'continue' || persist.originalSyntheticTrigger === 'generic'
+      || persist.originalSyntheticTrigger === null
+      ? { originalSyntheticTrigger: persist.originalSyntheticTrigger } : {}),
     ...(persist.agentFacingWireContent && typeof persist.agentFacingWireContent === 'object'
       ? { agentFacingWireContent: persist.agentFacingWireContent as IpcUserMessage }
       : {}),
@@ -1952,6 +1957,8 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
                         // 来源标签数据(只用于归属展示,不是权限判据)。
                         ...(sourceDevice ? { sourceDevice } : {}),
                         ...(persistUserMessage.sourcePlugin ? { sourcePlugin: persistUserMessage.sourcePlugin } : {}),
+                        ...(persistUserMessage.originalSyntheticTrigger !== undefined
+                          ? { originalSyntheticTrigger: persistUserMessage.originalSyntheticTrigger } : {}),
                         uuid: so.messageUuid,
                         ...(persistUserMessage[FORWARDED_REQUEST_RECEIPT]
                           ? { autoReviewUserText: persistUserMessage[FORWARDED_REQUEST_RECEIPT] }

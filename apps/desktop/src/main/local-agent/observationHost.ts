@@ -5,11 +5,20 @@ import { handleListDevices, defaultDeps } from '../device-link/ipc.js';
 import { captureDataOwnerBroadcastScope, isDataOwnerBroadcastScopeCurrent } from '../device-link/broadcast-tap.js';
 import { listSessionsForHistory, getMessagesForHistory } from '../localDb/chatHistoryReader.js';
 import { buildHistorySessionDeepLink } from '../deepLink.js';
+import { readHistoryObservationState, HISTORY_OBSERVATION_COHERENCE } from '../localDb/historyObservationState.js';
 import { getDeviceId } from '../authManager.js';
 import type { SessionQueueInspectionEntry } from '../maker-ipc/sessionQueueInspection.js';
 import { createHistoryRemoteDeps } from '../mcp-integrations/historyDevices.js';
 import { classifyRemoteHistoryError } from '../mcp-integrations/remoteChatHistory.js';
 import { createLocalAgentObservation, LocalAgentObservationError, type LocalAgentObservation } from './observation.js';
+
+function historyFailureCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  const known = ['HISTORY_CHANGED', 'COHERENCE_UNSUPPORTED', 'NOT_FOUND'];
+  if (typeof code === 'string' && known.includes(code)) return code;
+  return typeof message === 'string' ? /(?:^|: )\[(HISTORY_CHANGED|COHERENCE_UNSUPPORTED|NOT_FOUND)\]/.exec(message)?.[1] : undefined;
+}
 
 const defaultCaptureAccess = () => {
   const owner = captureDataOwnerBroadcastScope();
@@ -31,13 +40,14 @@ export function createLocalAgentObservationHost(
     try {
       const result = await remoteInvoke(deviceId, channel, args, { preSend: assertCurrent });
       assertCurrent();
-      if (!result.ok) throw new LocalAgentObservationError(classifyRemoteHistoryError(result.error.code, '').errorCode);
+      if (!result.ok) throw new LocalAgentObservationError(historyFailureCode(result.error)
+        ?? classifyRemoteHistoryError(result.error.code, '').errorCode);
       return result;
     } catch (error) {
       assertCurrent();
       if (error instanceof LocalAgentObservationError) throw error;
-      throw new LocalAgentObservationError(error instanceof DeviceLinkError
-        ? classifyRemoteHistoryError(error.code, '').errorCode : 'REMOTE_UNAVAILABLE');
+      throw new LocalAgentObservationError(historyFailureCode(error) ?? (error instanceof DeviceLinkError
+        ? classifyRemoteHistoryError(error.code, '').errorCode : 'REMOTE_UNAVAILABLE'));
     }
   };
   // History joins retain tombstones; explicit IDs must obey the live list's visibility too.
@@ -114,24 +124,51 @@ export function createLocalAgentObservationHost(
       await assertLiveTargets(deviceId, [sessionId], assertCurrent);
       assertCurrent();
       if (deviceId === 'local') {
-        const result = await getMessagesForHistory(args);
+        const before = await readHistoryObservationState(sessionId);
+        assertCurrent();
+        if (args.expectedRevision !== undefined && args.expectedRevision !== before.sourceRevision)
+          throw new LocalAgentObservationError('HISTORY_CHANGED');
+        const result = await getMessagesForHistory({ ...args, respectClearedAt: true });
         assertCurrent();
         await assertLiveTargets(deviceId, [sessionId], assertCurrent);
+        const after = await readHistoryObservationState(sessionId);
         assertCurrent();
-        return result;
+        if (before.sourceRevision !== after.sourceRevision || before.clearedAt !== after.clearedAt)
+          throw new LocalAgentObservationError('HISTORY_CHANGED');
+        return { ...result, ...after, coherence: HISTORY_OBSERVATION_COHERENCE };
       }
       // Preserve types until the observation boundary filters tools/thinking and hidden inputs.
-      // The MCP text-capping adapter flattens objects first and can destroy that evidence.
-      const result = await invoke(deviceId, DL_HISTORY_MESSAGES_CHANNEL, [{
+      // Legacy sources that ignore observation options must not be treated as coherent.
+      const request = {
         sessionId, workdir: args.workdir, fromMs: args.fromMs, toMs: args.toMs,
         agentKind: args.agentKind, roles: args.roles, includeRewound: false,
         limit: args.limit, cursor: args.cursor, order: args.order, contentCharLimit: null,
-      }], assertCurrent);
+        observation: { ...(args.expectedRevision !== undefined ? { expectedRevision: args.expectedRevision } : {}) },
+      };
+      const result = await invoke(deviceId, DL_HISTORY_MESSAGES_CHANNEL, [request], assertCurrent);
       await assertLiveTargets(deviceId, [sessionId], assertCurrent);
       assertCurrent();
       if (Buffer.byteLength(JSON.stringify(result.result)) > 1024 * 1024)
         throw new LocalAgentObservationError('REMOTE_PAYLOAD_TOO_LARGE');
-      return result.result;
+      const page = result.result as Record<string, unknown> | null;
+      if (!page || page.coherence !== HISTORY_OBSERVATION_COHERENCE || typeof page.sourceRevision !== 'string'
+        || !/^[\w-]{1,256}$/.test(page.sourceRevision)) throw new LocalAgentObservationError('COHERENCE_UNSUPPORTED');
+      return page;
+    },
+    async validateHistory(deviceId, sessionId, expected, assertCurrent) {
+      const state = deviceId === 'local' ? await readHistoryObservationState(sessionId)
+        : (await invoke(deviceId, DL_HISTORY_MESSAGES_CHANNEL, [{
+          sessionId, workdir: null, fromMs: null, toMs: null, agentKind: null, roles: [],
+          includeRewound: false, limit: 1, cursor: null, order: 'desc', contentCharLimit: null,
+          observation: { stateOnly: true, expectedRevision: expected.sourceRevision },
+        }], assertCurrent)).result as Record<string, unknown> | null;
+      assertCurrent();
+      if (!state || typeof state !== 'object' || Array.isArray(state) || (deviceId !== 'local'
+        && (!('coherence' in state) || state.coherence !== HISTORY_OBSERVATION_COHERENCE
+          || !('observationStateOnly' in state) || state.observationStateOnly !== true)))
+        throw new LocalAgentObservationError('COHERENCE_UNSUPPORTED');
+      if (state.sourceRevision !== expected.sourceRevision || state.clearedAt !== expected.clearedAt)
+        throw new LocalAgentObservationError('HISTORY_CHANGED');
     },
     async runtime(deviceId, sessionIds, assertCurrent) {
       await assertLiveTargets(deviceId, sessionIds, assertCurrent);
@@ -161,7 +198,7 @@ export function createLocalAgentObservationHost(
       } catch (error) {
         assertCurrent();
         if (error instanceof LocalAgentObservationError) throw error;
-        throw new LocalAgentObservationError('OBSERVATION_UNAVAILABLE');
+        throw new LocalAgentObservationError(historyFailureCode(error) ?? 'OBSERVATION_UNAVAILABLE');
       }
     },
   };

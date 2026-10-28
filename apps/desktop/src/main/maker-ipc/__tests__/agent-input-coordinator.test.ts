@@ -11,6 +11,8 @@ import { createPluginTaskReviewResolver, type PluginReviewSnapshot } from '../pl
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { admitTaskAction, bindTaskActionInput, taskActionInputGuard } from '../taskActionAuthorization.js';
 import { AgentInputCoordinator } from '../agent-input-coordinator.js';
+import { createLocalAgentObservation } from '../../local-agent/observation.js';
+import { messageToCamel } from '../../localDb/mapper.js';
 import { ProviderGroupUsageLimitError } from '../../provider-group/failurePolicy.js';
 import type { Session } from '@cindy/maker-core';
 import { createSessionBindingLifecycle, createSessionCloseTeardown } from '../sessionBindingLifecycle.js';
@@ -58,6 +60,7 @@ import {
   CONTINUE_AFTER_APP_EXIT_PROMPT,
   CONTINUE_AFTER_ERROR_PROMPT,
   UI_ACTION_TRIGGER_PREFIX,
+  syntheticTriggerKind,
 } from '../../../shared/interruptedTurn.js';
 import type { RecoveryContextSnapshot } from '../recoveryCoordinator.js';
 import {
@@ -1231,6 +1234,9 @@ function makeItem(
   return {
     clientId,
     text,
+    // Most fixtures also serve as expected accepted queue rows. Legacy/raw input
+    // regressions explicitly override this field with undefined below.
+    originalSyntheticTrigger: syntheticTriggerKind(text),
     persistedContent: text,
     model: 'claude-opus-4-7',
     effort: 'medium',
@@ -11432,6 +11438,97 @@ describe('AgentInputCoordinator crash-recovery queue snapshots (issue #761)', ()
     expect(projection.continuationInFlightClientId).toBeNull();
   });
 
+  // PR #7696 / r4401129106: unit regression through enqueue/restore → plugin rewrite
+  // → real send transaction → canonical createDbMessage DTO. Existing rewrite tests
+  // stopped before history persistence; the minimal loss is a rewritten hidden prefix.
+  it.each([
+    { name: 'fresh generic', text: `${UI_ACTION_TRIGGER_PREFIX} hidden action`, restored: false, expected: 'generic' },
+    { name: 'fresh continue', text: CONTINUE_AFTER_ERROR_PROMPT, restored: false, expected: 'continue' },
+    { name: 'fresh ordinary', text: 'rewritten body', restored: false, expected: null },
+    { name: 'ordinary JSON literal', text: JSON.stringify({ text: `${UI_ACTION_TRIGGER_PREFIX} example` }), restored: false, wrapped: true, expected: null },
+    { name: 'main hidden welcome', text: 'welcome', restored: false, hidden: true, expected: 'generic' },
+    { name: 'persisted prefix', text: 'welcome', restored: false, persisted: JSON.stringify({ text: `${UI_ACTION_TRIGGER_PREFIX} welcome` }), expected: 'generic' },
+    { name: 'legacy unknown', text: 'rewritten body', restored: true, expected: undefined },
+    { name: 'legacy prefix', text: `${UI_ACTION_TRIGGER_PREFIX} hidden action`, restored: true, expected: 'generic' },
+    { name: 'saved generic', text: 'rewritten body', restored: true, marker: 'generic', expected: 'generic' },
+    { name: 'saved continue', text: 'rewritten body', restored: true, marker: 'continue', expected: 'continue' },
+    { name: 'saved ordinary', text: `${UI_ACTION_TRIGGER_PREFIX} hidden action`, restored: true, marker: null, expected: null },
+  ] as const)('persists frozen synthetic provenance: $name', async testCase => {
+    const h = createHarness();
+    const sid = 'provenance';
+    const persisted = deferred<void>();
+    const createDbMessage = vi.fn(async (..._args: unknown[]) => { persisted.resolve(undefined); });
+    const session: MakerSendTransactionSession = {
+      id: sid, instanceId: 'runtime', agentKind: 'claude-code', workDir: '/repo',
+      remoteHostId: null, isTurnRunning: () => false,
+      send: vi.fn(async (_message, opts) => {
+        await opts?.beforeProviderStart?.();
+        await opts?.onAccepted?.();
+        opts?.onDispatching?.();
+        return { accepted: true as const };
+      }),
+    };
+    const transaction = createMakerSendTransaction({
+      getSession: () => session, closeSession: async () => {}, preflightBotRuntimeResources: async () => {},
+      getSessionMeta: async () => ({}), ensureRemoteReadyForSessionStart: async () => {},
+      checkWorkDirExists: async () => true, isOrcaMcpHydrated: () => true,
+      buildCreateOptsWithStderr: x => x, synthesizeOrcaVendorOptionsFromDb: async () => false,
+      readSessionExtraDirsFromDb: async () => [], readSessionWorkingDirFromDb: async () => null,
+      statDirectory: async () => ({ isDirectory: () => false }),
+      readWorkingDirectoryRecoveryCreateOpts: async () => ({ agentKind: 'claude-code', workingDir: '/repo', model: 'claude-opus-4-7' }),
+      withRehydrateCloseSuppressed: async (_id, fn) => fn(),
+      bootstrapSession: async () => ({ session, didInjectOrcaInstructions: false, didInjectProjectContext: false }),
+      markOrcaRoleIfNeeded: async () => {}, broadcastSessionCreated: () => {},
+      prepareSendUserMessage: async (_id, message) => message as string,
+      createDbMessage, isSessionRunningError: () => false, log: { info: () => {}, warn: () => {} },
+    });
+    h.sendToAgent.mockImplementation(async (...args) =>
+      (await transaction.sendToAgentAccepted(...args)).outcome);
+    h.setScreenUserMessage(async () => ({ action: 'rewrite', ghostId: 'ghost', ghostName: 'Guard', text: 'rewritten body' }));
+    const item = makeItem('input', testCase.text, {
+      originalSyntheticTrigger: 'marker' in testCase ? testCase.marker : undefined,
+      ...('hidden' in testCase ? { agentOmitsTriggerPrefix: true as const } : {}),
+      ...('persisted' in testCase ? { persistedContent: testCase.persisted } : {}),
+    });
+    if (testCase.restored) {
+      h.setLoadQueueSnapshot(async () => JSON.parse(JSON.stringify([item])));
+      await h.coordinator.ensureQueueRestored(sid);
+      h.coordinator.resume(sid);
+    } else {
+      h.coordinator.enqueue(sid, item);
+    }
+    await persisted.promise;
+    await h.sendToAgent.mock.results[0].value;
+    expect(createDbMessage).toHaveBeenCalledOnce();
+    const persistOptions = h.sendToAgent.mock.calls[0][3].persistUserMessage!;
+    expect(persistOptions.originalSyntheticTrigger).toBe(testCase.expected);
+    expect(createDbMessage.mock.calls[0][1]).toMatchObject({
+      clientId: 'input', role: 'user', content: 'persisted' in testCase || 'wrapped' in testCase
+        ? JSON.stringify({ text: 'rewritten body', slashCommandRanges: [] }) : 'rewritten body',
+      agentMeta: testCase.expected === undefined ? {} : { originalSyntheticTrigger: testCase.expected },
+    });
+    const row = createDbMessage.mock.calls[0][1] as { content: string; agentMeta: Record<string, unknown> };
+    expect(Object.hasOwn(row.agentMeta, 'originalSyntheticTrigger')).toBe(testCase.expected !== undefined);
+    const mapped = messageToCamel({ ...row, id: 'db-user-row', sessionId: sid, clientId: 'input', role: 'user',
+      toolUseId: null, agentKind: 'cc', createdAt: 1, rewindAt: null, agentMeta: JSON.stringify(row.agentMeta) });
+    const emptyPage = { items: [], nextCursor: null, hasMore: false };
+    const reader = createLocalAgentObservation({
+      listDevices: async () => [{ deviceId: 'local', deviceName: 'Local', local: true, available: true }],
+      sessions: async () => emptyPage,
+      history: async () => ({ ...emptyPage, items: [{ ...mapped, createdAt: 1, rewindAt: null }],
+        coherence: 'db-change-counter-v1', sourceRevision: 'fixture', clearedAt: null }),
+      validateHistory: async () => {},
+      runtime: async () => ({ format: 'active-sessions-v2', sessions: [] }),
+    });
+    const observation = await reader.read('observation/history', { sessionId: sid }, () => {});
+    expect(observation).toMatchObject({
+      messages: testCase.expected === null
+        ? [expect.objectContaining({ id: 'db-user-row', role: 'user', text: 'rewritten body' })] : [],
+      partial: testCase.expected !== null,
+      unknownInputProvenance: testCase.expected === undefined,
+    });
+  });
+
   it('preserves the original Continue intent when a Ghost rewrites the dispatch text', async () => {
     const h = createHarness();
     const sid = 'continue-ghost-rewrite';
@@ -11477,7 +11574,7 @@ describe('AgentInputCoordinator crash-recovery queue snapshots (issue #761)', ()
     await flush();
 
     const dispatchedItem = h.onDispatchedUserTurn.mock.calls[0]?.[1];
-    expect(dispatchedItem?.originalSyntheticTrigger).toBeUndefined();
+    expect(dispatchedItem?.originalSyntheticTrigger).toBeNull();
     expect(latestProjection(h.projections).continuationInFlightClientId).toBeNull();
   });
 

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLocalAgentObservation, LocalAgentObservationError, type ObservationDeps } from '../observation.js';
 import { createLocalAgentObservationHost } from '../observationHost.js';
 import { remoteInvoke } from '../../device-link/index.js';
@@ -7,11 +7,20 @@ import type { Maker } from '@cindy/maker-core';
 import { ipcMain } from 'electron';
 import { DL_HISTORY_MESSAGES_CHANNEL } from '@cindy/device-link';
 import { registerRemoteHistoryIpc } from '../../localDb/ipc/history.js';
+import { readHistoryObservationState } from '../../localDb/historyObservationState.js';
 import { listSessionsForHistory, getMessagesForHistory } from '../../localDb/chatHistoryReader.js';
 import { projectSessionQueueForInspection } from '../../maker-ipc/sessionQueueInspection.js';
 import type { AgentInputQueuedMessage } from '../../../shared/agentInputQueue.js';
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }));
-vi.mock('../../localDb/client/current.js', () => ({ getDbClient: vi.fn() }));
+vi.mock('../../localDb/client/current.js', () => ({ getDbClient: vi.fn(), getCurrentDbClientSnapshot: vi.fn() }));
+vi.mock('../../localDb/historyObservationState.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../localDb/historyObservationState.js')>(),
+  readHistoryObservationState: vi.fn(),
+}));
+vi.mock('../../device-link/invoke-context.js', () => ({ getDeviceLinkInvokeContext: () => null }));
+beforeEach(() => {
+  vi.mocked(readHistoryObservationState).mockResolvedValue({ sourceRevision: 'fixture-revision', clearedAt: null });
+});
 vi.mock('../../localDb/sessionTerminal.js', () => ({ readLatestSessionTerminal: vi.fn() }));
 vi.mock('../../device-link/index.js', () => ({ remoteInvoke: vi.fn() }));
 vi.mock('../../device-link/ipc.js', () => ({ handleListDevices: vi.fn(), defaultDeps: () => ({}) }));
@@ -36,14 +45,17 @@ const empty = { items: [], nextCursor: null, hasMore: false };
 function setup(overrides: Partial<ObservationDeps> = {}) {
   const deps: ObservationDeps = {
     listDevices: vi.fn(async () => devices), sessions: vi.fn(async () => empty),
-    history: vi.fn(async () => empty), runtime: vi.fn(async () => ({ format: 'active-sessions-v2', sessions: [] })),
+    history: vi.fn(async () => empty), validateHistory: vi.fn(async () => {}), runtime: vi.fn(async () => ({ format: 'active-sessions-v2', sessions: [] })),
     ...overrides,
   };
+  const history = deps.history;
+  deps.history = async (...args) => ({ coherence: 'db-change-counter-v1', sourceRevision: 'fixture-revision', clearedAt: null,
+    ...await history(...args) as Record<string, unknown> });
   return { deps, reader: createLocalAgentObservation(deps) };
 }
 const current = () => {};
 const row = (id: string, role = 'assistant', content: unknown = 'hello') => ({ id, role, content, rewindAt: null,
-  createdAt: 1, agentMeta: { secret: 'hidden' }, toolParams: 'hidden', sessionId: 'untrusted' });
+  createdAt: 1, agentMeta: { secret: 'hidden', originalSyntheticTrigger: null }, toolParams: 'hidden', sessionId: 'untrusted' });
 
 describe('local agent observation read', () => {
   it('paginates the live authorized device directory with bounded, reusable continuations', async () => {
@@ -91,13 +103,14 @@ describe('local agent observation read', () => {
     vi.mocked(handleListDevices).mockResolvedValue({ devices: [{ deviceId: 'remote', name: 'Remote',
       isSelf: false, online: true, controlEnabled: true, remoteControlEnabled: true, platform: 'macos' } as any] });
     vi.mocked(remoteInvoke).mockResolvedValue({ ok: true, result: { ok: true,
-      sessions: [{ id: 's::opaque', title: 'Remote title', createdAt: '2026-01-01T00:00:00.000Z',
+      sessions: [{ id: 's::opaque', title: 'Remote title', clearedAt: 42, createdAt: '2026-01-01T00:00:00.000Z',
         sessionUrl: 'cindy://session/s%3A%3Aopaque?device=remote', model: 'secret' }],
       nextCursor: sourceToken, hasMore: true } });
     const host = createLocalAgentObservationHost({ listActiveSessions: () => [] } as unknown as Maker, () => current);
     const first = await host.read('observation/sessions', { deviceId: 'remote', limit: 2 }, current) as any;
-    expect(first.sessions).toEqual([{ sessionId: 's::opaque', title: 'Remote title',
+    expect(first.sessions).toEqual([{ sessionId: 's::opaque', title: 'Remote title', clearBoundaryKnown: true, clearedAt: 42,
       createdAt: '2026-01-01T00:00:00.000Z', sessionUrl: 'cindy://session/s%3A%3Aopaque?device=remote' }]);
+    expect(first).toMatchObject({ consistency: 'live', captureComplete: false });
     await host.read('observation/sessions', { deviceId: 'remote', limit: 1, cursor: first.nextCursor }, current);
     expect(vi.mocked(remoteInvoke).mock.calls.at(-1)?.[2]).toEqual([{ tool: 'list_sessions', args: {
       device: 'local', limit: 1, order: 'desc', cursor: sourceToken,
@@ -120,6 +133,7 @@ describe('local agent observation read', () => {
     let oversized = false;
     registerRemoteHistoryIpc({
       sessionExists: async id => id === 's::opaque',
+      observationState: async () => ({ sourceRevision: 'fixture-revision', clearedAt: null }),
       getMessages: async () => ({ ...empty, items: oversized ? [row('large', 'assistant', 'x'.repeat(1024 * 1024))] : [
         row('thinking', 'assistant', { type: 'thinking', text: 'private thinking' }),
         row('tool', 'assistant', { type: 'tool_use', content: 'private tool' }),
@@ -140,8 +154,8 @@ describe('local agent observation read', () => {
         return { ok: true, result: { id: 's::opaque', status: 'active' } };
       }
       expect(channel).toBe(DL_HISTORY_MESSAGES_CHANNEL);
-      request = values[0];
-      return { ok: true, result: await handlers.get(channel)!({}, request) };
+      if (!(values[0] as any).observation?.stateOnly) request = values[0];
+      return { ok: true, result: await handlers.get(channel)!({}, values[0]) };
     });
     const host = createLocalAgentObservationHost({ listActiveSessions: () => [] } as unknown as Maker, () => current);
     const result = await host.read('observation/history', { deviceId: 'remote', sessionId: 's::opaque' }, current) as any;
@@ -164,7 +178,7 @@ describe('local agent observation read', () => {
   it('redacts host continuations through the real queue projector without hiding matching human text', async () => {
     // PR7696 P1: the projector dropped autoResume before the observation visibility check.
     const queued = (clientId: string, value: string, flags: Partial<AgentInputQueuedMessage> = {}): AgentInputQueuedMessage => ({
-      clientId, text: value, persistedContent: value, model: 'test-model', effort: 'medium',
+      clientId, text: value, originalSyntheticTrigger: null, persistedContent: value, model: 'test-model', effort: 'medium',
       permissionMode: 'auto', workingDir: '/repo',
       chatMessage: { clientId, role: 'user', content: value },
       createOpts: { agentKind: 'pi', workingDir: '/repo', model: 'test-model' }, ...flags,
@@ -172,14 +186,15 @@ describe('local agent observation read', () => {
     const pending = [queued('auto-en', 'continue', { autoResume: true }),
       queued('auto-zh', '继续', { autoResume: true }),
       queued('rewritten', 'rewritten instruction', { originalSyntheticTrigger: 'generic' }),
-      queued('human', 'continue')];
+      queued('human', 'continue'), queued('legacy', 'unknown legacy body', { originalSyntheticTrigger: undefined })];
     const { reader } = setup({ readLocalQueue: () => projectSessionQueueForInspection(pending, ['auto-en']) });
     const result = await reader.read('observation/inspect', { sessionIds: ['s'] }, current) as any;
-    expect(result.sessions[0].queue).toMatchObject({ count: 4, truncated: true, items: [
+    expect(result.sessions[0].queue).toMatchObject({ count: 5, truncated: true, items: [
       { queuedMessageId: 'auto-en', position: 0, consuming: true, hidden: true, content: '', truncated: true },
       { queuedMessageId: 'auto-zh', position: 1, consuming: false, hidden: true, content: '', truncated: true },
       { queuedMessageId: 'rewritten', position: 2, consuming: false, hidden: true, content: '', truncated: true },
       { queuedMessageId: 'human', position: 3, consuming: false, content: 'continue', truncated: false },
+      { queuedMessageId: 'legacy', position: 4, consuming: false, content: '', provenanceUnknown: true, truncated: true },
     ] });
     expect(result.sessions[0].queue.items[3]).not.toHaveProperty('hidden');
     expect(result.partial).toBe(true);
@@ -278,9 +293,91 @@ describe('local agent observation read', () => {
       hasMore: true, nextCursor: sourceToken }));
     const { reader } = setup({ sessions });
     const first = await reader.read('observation/sessions', { deviceId: 'remote' }, current) as any;
-    expect(first.sessions).toEqual([{ sessionId: 's::opaque', title: 'Title' }]);
+    expect(first.sessions).toEqual([{ sessionId: 's::opaque', title: 'Title', clearBoundaryKnown: false }]);
+    expect(first).toMatchObject({ partial: true, consistency: 'live', captureComplete: false });
     await reader.read('observation/sessions', { deviceId: 'remote', cursor: first.nextCursor }, current);
     expect(sessions.mock.calls[1][1]).toMatchObject({ cursor: sourceToken, limit: 50, includeDeleted: false });
+  });
+
+  /* Dashboard blockers: query-only tokens could combine pre/post-clear or same-size edits.
+   * Public facade/host/remote-handler unit tier; unchanged counts/timestamps are the minimal
+   * mutation input. SQLite visibility and real counter semantics are covered by reader/client tests. */
+  it.each(['edit', 'rewind', 'clear'])('invalidates a multi-page capture after %s without relying on lengths or timestamps', async mutation => {
+    let revision = 'initial', clearedAt: number | null = null;
+    const firstRow = row('first', 'user', 'aa'), lastRow = { ...row('last'), createdAt: 2 };
+    const { reader } = setup({ history: async (_device, _id, args) => ({
+      items: [args.cursor ? lastRow : firstRow], sourceRevision: revision, clearedAt,
+      nextCursor: args.cursor ? null : { createdAt: 1, id: 'first', rowid: 1 }, hasMore: !args.cursor,
+    }) });
+    const first = await reader.read('observation/history', { sessionId: 's', limit: 1, order: 'asc' }, current) as any;
+    expect(first).toMatchObject({ sourceRevision: 'initial', clearedAt: null, consistency: 'mutation-checked', snapshot: false });
+    if (mutation === 'edit') firstRow.content = 'zz';
+    if (mutation === 'rewind') firstRow.rewindAt = 3 as any;
+    if (mutation === 'clear') clearedAt = 1;
+    revision = 'changed';
+    await expect(reader.read('observation/history', { sessionId: 's', limit: 1, order: 'asc', cursor: first.nextCursor }, current))
+      .rejects.toMatchObject({ code: 'HISTORY_CHANGED' });
+    await expect(reader.read('observation/history', { sessionId: 's', expectedRevision: first.sourceRevision }, current))
+      .rejects.toMatchObject({ code: 'HISTORY_CHANGED' });
+  });
+
+  it('preserves nullable clear metadata and fails closed for an unknown or violated history boundary', async () => {
+    const { reader } = setup({ sessions: async () => ({ ...empty, items: [
+      { id: 'never-cleared', clearedAt: null }, { id: 'cleared', clearedAt: 10 }, { id: 'legacy' },
+    ] }) });
+    const catalog = await reader.read('observation/sessions', {}, current) as any;
+    expect(catalog.sessions).toEqual([
+      { sessionId: 'never-cleared', clearedAt: null, clearBoundaryKnown: true },
+      { sessionId: 'cleared', clearedAt: 10, clearBoundaryKnown: true },
+      { sessionId: 'legacy', clearBoundaryKnown: false },
+    ]);
+    expect(catalog).toMatchObject({ partial: true, consistency: 'live', captureComplete: false });
+    const legacy = createLocalAgentObservation({ ...setup().deps, history: async () => empty });
+    await expect(legacy.read('observation/history', { sessionId: 's' }, current))
+      .rejects.toMatchObject({ code: 'COHERENCE_UNSUPPORTED' });
+    for (const createdAt of [9, 10, undefined]) {
+      const bad = setup({ history: async () => ({ ...empty, clearedAt: 10, items: [{ ...row('hidden'), createdAt }] }) }).reader;
+      await expect(bad.read('observation/history', { sessionId: 's' }, current))
+        .rejects.toMatchObject({ code: 'HISTORY_CHANGED' });
+    }
+  });
+
+  it('rejects local history changed during the read and opts the real reader into clear visibility', async () => {
+    let revision = 'initial';
+    vi.mocked(readHistoryObservationState).mockImplementation(async () => ({ sourceRevision: revision, clearedAt: null }));
+    vi.mocked(listSessionsForHistory).mockResolvedValue({ ...empty, items: [{ id: 's', status: 'active' } as any] });
+    vi.mocked(getMessagesForHistory).mockImplementation(async args => {
+      expect(args).toMatchObject({ includeRewound: false, respectClearedAt: true });
+      revision = 'changed';
+      return { ...empty, items: [row('message')] } as any;
+    });
+    const host = createLocalAgentObservationHost({ listActiveSessions: () => [] } as unknown as Maker, () => current);
+    await expect(host.read('observation/history', { sessionId: 's' }, current)).rejects.toMatchObject({ code: 'HISTORY_CHANGED' });
+  });
+
+  it.each(['metadata', 'delivery-eligibility'])('revalidates remote source state after the %s await without exposing transport details', async timing => {
+    const handlers = new Map<string, (...args: any[]) => any>();
+    vi.mocked(ipcMain.handle).mockImplementation((channel, handler) => { handlers.set(channel, handler); });
+    let revision = 'initial', metadataReads = 0, directoryReads = 0;
+    registerRemoteHistoryIpc({ sessionExists: async () => true, readTerminal: async () => undefined,
+      observationState: async () => ({ sourceRevision: revision, clearedAt: null }),
+      getMessages: async () => ({ ...empty, items: [row('message')] }) as any });
+    vi.mocked(handleListDevices).mockImplementation(async () => {
+      if (++directoryReads === 2 && timing === 'delivery-eligibility') revision = 'changed';
+      return { devices: [{ deviceId: 'remote', name: 'Remote', isSelf: false, online: true,
+        controlEnabled: true, remoteControlEnabled: true, platform: 'macos' } as any] };
+    });
+    vi.mocked(remoteInvoke).mockImplementation(async (_device, channel, args) => {
+      if (channel === 'local-db:sessions:get') {
+        if (++metadataReads === 2 && timing === 'metadata') revision = 'changed';
+        return { ok: true, result: { id: 's', status: 'active' } };
+      }
+      try { return { ok: true, result: await handlers.get(channel)!({}, args[0]) }; }
+      catch (error) { return { ok: false, error: { code: 'IPC_ERROR', message: (error as Error).message + ' private transport detail' } }; }
+    });
+    const host = createLocalAgentObservationHost({ listActiveSessions: () => [] } as unknown as Maker, () => current);
+    await expect(host.read('observation/history', { deviceId: 'remote', sessionId: 's' }, current))
+      .rejects.toMatchObject({ code: 'HISTORY_CHANGED', message: 'HISTORY_CHANGED' });
   });
 
   it('filters hidden and rewound messages, never stringifies tool blocks, and bounds total text', async () => {
@@ -296,6 +393,18 @@ describe('local agent observation read', () => {
     expect(result.partial).toBe(true);
     expect(JSON.stringify(result)).not.toContain('hidden');
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(131072);
+  });
+
+  it('omits legacy unknown user bodies instead of treating missing provenance as human authorship', async () => {
+    const { reader } = setup({ history: async () => ({ ...empty, items: [
+      { ...row('rewritten', 'user', 'same plain text'), agentMeta: { originalSyntheticTrigger: 'generic' } },
+      { ...row('legacy', 'user', 'same plain text'), agentMeta: {} },
+      { ...row('invalid', 'user', 'same plain text'), agentMeta: { originalSyntheticTrigger: false } },
+      row('human', 'user', 'same plain text'),
+    ] }) });
+    const result = await reader.read('observation/history', { sessionId: 's' }, current) as any;
+    expect(result.messages).toMatchObject([{ id: 'human', text: 'same plain text' }]);
+    expect(result).toMatchObject({ partial: true, unknownInputProvenance: true });
   });
 
   it('preserves upstream and structured truncation without exposing typed thinking or tool objects', async () => {

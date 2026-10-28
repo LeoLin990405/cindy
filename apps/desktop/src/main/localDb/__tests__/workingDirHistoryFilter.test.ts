@@ -16,9 +16,10 @@ import {
   normalizeHistoryWorkingDir,
   resolveStoredWorkingDirCandidates,
 } from '../workingDirHistoryFilter';
-import { listSessionsForHistory, listWorkdirsForHistory } from '../chatHistoryReader';
+import { getMessagesForHistory, listSessionsForHistory, listWorkdirsForHistory } from '../chatHistoryReader';
 import { clearCurrentDbClient, setCurrentDbClient } from '../client/current';
 import type { DbClient } from '../client/DbClient';
+import { readHistoryObservationState } from '../historyObservationState';
 import * as schema from '../schema';
 
 function createLocalDb(): Database.Database {
@@ -83,6 +84,7 @@ function createLocalDb(): Database.Database {
       content TEXT NOT NULL,
       tool_use_id TEXT,
       agent_meta TEXT,
+      agent_kind TEXT,
       created_at INTEGER NOT NULL,
       rewind_at INTEGER
     );
@@ -130,6 +132,71 @@ afterEach(() => {
   clearCurrentDbClient();
   openDb?.close();
   openDb = null;
+});
+
+// Test value: exercise the production observation helper's DB/current-snapshot boundary.
+// Gap: reader visibility tests do not cover revision identity or fail-closed observations.
+// Minimal inputs: one session/message, a same-length edit, or a snapshot swap at an await.
+// Unit tier: reuse isolated SQLite and one module load; injected witness uses SQLite's
+// connection change counter, not a copy of the helper's hashing/validation algorithm.
+// Measured standalone after follow-up: 0.94s (Node 22, vitest; 16 tests).
+describe('readHistoryObservationState database boundary', () => {
+  function useObservationDb() {
+    const db = useDb();
+    const client = makeTestDbClient(db);
+    client.readHistoryRevision = vi.fn(async () => String(
+      (db.prepare('SELECT total_changes() AS changes').get() as { changes: number }).changes,
+    ));
+    setCurrentDbClient(client, 'test-user');
+    insertSession(db, 'observed', '/repo/project', 1000);
+    return { db, client };
+  }
+
+  it('preserves stable null/clear metadata and changes revision on edit, rewind, and clear', async () => {
+    const { db } = useObservationDb();
+    db.exec(`INSERT INTO messages (id, client_id, session_id, role, content, created_at)
+      VALUES ('m', 'm', 'observed', 'user', '"a"', 1001)`);
+    let previous = await readHistoryObservationState('observed');
+    expect(previous.clearedAt).toBeNull();
+    expect(await readHistoryObservationState('observed')).toEqual(previous);
+    for (const mutation of [
+      `UPDATE messages SET content = '"b"' WHERE id = 'm'`,
+      `UPDATE messages SET rewind_at = 1002 WHERE id = 'm'`,
+      `UPDATE sessions SET cleared_at = 1003 WHERE id = 'observed'`,
+    ]) {
+      db.exec(mutation);
+      const next = await readHistoryObservationState('observed');
+      expect(next.sourceRevision).not.toBe(previous.sourceRevision);
+      previous = next;
+    }
+    expect(previous.clearedAt).toBe(1003);
+    expect(await readHistoryObservationState('observed')).toEqual(previous);
+  });
+
+  it.each([1, 2])('rejects snapshot replacement during revision await %s', async (swapAt) => {
+    const { client } = useObservationDb();
+    let reads = 0;
+    client.readHistoryRevision = vi.fn(async () => {
+      if (++reads === swapAt) setCurrentDbClient(client, 'test-user');
+      return 'stable-witness';
+    });
+    await expect(readHistoryObservationState('observed')).rejects.toMatchObject({ code: 'HISTORY_CHANGED' });
+  });
+
+  it('rejects a revision that changes during the observation', async () => {
+    const { client } = useObservationDb();
+    client.readHistoryRevision = vi.fn().mockResolvedValueOnce('before').mockResolvedValueOnce('after');
+    await expect(readHistoryObservationState('observed')).rejects.toMatchObject({ code: 'HISTORY_CHANGED' });
+  });
+
+  it('fails closed for missing/deleted sessions and a missing witness', async () => {
+    const { db, client } = useObservationDb();
+    await expect(readHistoryObservationState('missing')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    db.exec(`UPDATE sessions SET status = 'deleted' WHERE id = 'observed'`);
+    await expect(readHistoryObservationState('observed')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    delete client.readHistoryRevision;
+    await expect(readHistoryObservationState('observed')).rejects.toMatchObject({ code: 'COHERENCE_UNSUPPORTED' });
+  });
 });
 
 describe('normalizeHistoryWorkingDir', () => {
@@ -219,6 +286,64 @@ describe('listSessionsForHistory workdir filter', () => {
     });
 
     expect(page.items.map((s) => s.id).sort()).toEqual(['s1', 's2']);
+  });
+});
+
+// Test value: real getMessagesForHistory must hide cleared/deleted history only on opt-in.
+// Existing workdir tests never read messages. Minimal failure: one row at cleared_at.
+// Unit tier: in-process SQLite only; reuse this file's isolated fixture and module load.
+describe('getMessagesForHistory clear visibility', () => {
+  it.each([null, '/repo/project'])('preserves visibility and cursors with workdir=%s', async (workdir) => {
+    const db = useDb();
+    for (const id of ['cleared', 'uncleared', 'deleted']) {
+      insertSession(db, id, '/repo/project', 1_000);
+    }
+    db.exec(`
+      UPDATE sessions SET cleared_at = 2000 WHERE id = 'cleared';
+      UPDATE sessions SET status = 'deleted' WHERE id = 'deleted';
+    `);
+    const insert = db.prepare(`INSERT INTO messages
+      (id, client_id, session_id, role, content, created_at, rewind_at)
+      VALUES (?, ?, ?, 'user', '[]', ?, ?)`);
+    for (const [id, sessionId, time, rewind] of [
+      ['before', 'cleared', 1999, null],
+      ['exact', 'cleared', 2000, null],
+      ['post-z', 'cleared', 2001, null],
+      ['post-a', 'cleared', 2001, null],
+      ['rewound', 'cleared', 2002, 2003],
+      ['uncleared', 'uncleared', 1998, null],
+      ['deleted', 'deleted', 2004, null],
+    ] as const) insert.run(id, id, sessionId, time, rewind);
+
+    const params = {
+      sessionIds: null, workdir, fromMs: null, toMs: null, agentKind: null,
+      roles: null, includeRewound: false, limit: 20, cursor: null, order: 'asc' as const,
+    };
+    expect((await getMessagesForHistory(params)).items.map((m) => m.id)).toEqual([
+      'uncleared', 'before', 'exact', 'post-z', 'post-a', 'deleted',
+    ]);
+    const visible = { ...params, respectClearedAt: true };
+    expect((await getMessagesForHistory(visible)).items.map((m) => m.id)).toEqual([
+      'uncleared', 'post-z', 'post-a',
+    ]);
+    expect((await getMessagesForHistory({ ...visible, includeRewound: true })).items.map((m) => m.id))
+      .toEqual(['uncleared', 'post-z', 'post-a', 'rewound']);
+    for (const order of ['asc', 'desc'] as const) {
+      const first = await getMessagesForHistory({ ...visible, order, limit: 2 });
+      expect(first.hasMore).toBe(true);
+      expect(first.nextCursor?.rowid).toEqual(expect.any(Number));
+      const second = await getMessagesForHistory({ ...visible, order, limit: 2, cursor: first.nextCursor });
+      expect([...first.items, ...second.items].map((m) => m.id)).toEqual(order === 'asc'
+        ? ['uncleared', 'post-z', 'post-a'] : ['post-a', 'post-z', 'uncleared']);
+      expect(second.hasMore).toBe(false);
+    }
+    const sessions = await listSessionsForHistory({
+      workdir, fromMs: null, toMs: null, agentKind: null, includeDeleted: false,
+      limit: 20, cursor: null, order: 'asc',
+    });
+    expect(sessions.items.map((s) => [s.id, s.clearedAt])).toEqual([
+      ['cleared', 2000], ['uncleared', null],
+    ]);
   });
 });
 

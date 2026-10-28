@@ -849,7 +849,7 @@ export async function createLocalAgentServer(deps: LocalAgentServerDeps) {
               toolPolicy: true,
               nativeReadOnly: false,
               scopedPermissions: true,
-              ...(deps.observation ? { taskObservation: 1 } : {}),
+              ...(deps.observation ? { taskObservation: 1, historyCoherence: 1 } : {}),
             },
             methods: [
               'models',

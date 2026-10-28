@@ -200,6 +200,7 @@ describe('local application authorization and lifecycle', () => {
     expect(f.server().connections().map(item => item.permissions)).toEqual([['agent:execute'], ['tasks:read']]);
     const caps = (await f.rpc('capabilities')).result;
     expect(caps.features.taskObservation).toBe(1);
+    expect(caps.features.historyCoherence).toBe(1);
     expect(caps.features.nativeReadOnly).toBe(false);
     expect(caps.methods).toContain('observation/devices');
   });
@@ -213,6 +214,7 @@ describe('local application authorization and lifecycle', () => {
     expect((await f.rpc('connect/start', { client: 'Notes', permissions: ['tasks:read'] })).error.code).toBe('METHOD_UNSUPPORTED');
     expect(approve).not.toHaveBeenCalled();
     expect((await f.rpc('capabilities')).result.features.taskObservation).toBeUndefined();
+    expect((await f.rpc('capabilities')).result.features.historyCoherence).toBeUndefined();
   });
 
   it.each(['revoke', 'owner-change'])('withholds a pending observation after %s without stopping observed tasks', async boundary => {

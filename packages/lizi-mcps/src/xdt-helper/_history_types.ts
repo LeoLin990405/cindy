@@ -83,6 +83,8 @@ export interface HistorySession {
   parentSessionId: string | null;
   createdAt: number; // unix ms
   updatedAt: number;
+  /** unix ms; omitted by older history transports. */
+  clearedAt?: number | null;
   userSendAt: number | null;
   messageCount: number;
   lastActivityAt?: number;

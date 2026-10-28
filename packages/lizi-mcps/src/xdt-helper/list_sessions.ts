@@ -164,6 +164,7 @@ export function registerListSessionsTool(
             source: s.source,
             createdAt: new Date(s.createdAt).toISOString(),
             updatedAt: new Date(s.updatedAt).toISOString(),
+            ...(s.clearedAt !== undefined ? { clearedAt: s.clearedAt } : {}),
             messageCount: s.messageCount,
             ...(s.lastActivityAt !== undefined ? { lastActivityAt: new Date(s.lastActivityAt).toISOString() } : {}),
             ...(s.companion !== undefined ? { companion: s.companion } : {}),

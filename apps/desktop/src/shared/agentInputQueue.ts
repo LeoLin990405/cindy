@@ -323,7 +323,8 @@ export interface AgentInputQueuedMessage {
    * 与 dispatch 前的其它正文变换都不得改写它；执行端用它判断 Continue 的
    * 优先级与 durable ack，避免从已经被改写的 text 反推原始用户动作。
    */
-  readonly originalSyntheticTrigger?: 'continue' | 'generic';
+  // null = known ordinary input; undefined = legacy snapshot with unknown provenance.
+  readonly originalSyntheticTrigger?: 'continue' | 'generic' | null;
   persistedContent: string;
   model: string;
   effort: string;

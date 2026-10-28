@@ -20,6 +20,11 @@ import { getDbClient } from '../client/current';
 import { sessions } from '../schema';
 import { readLatestSessionTerminal, type SessionTerminalHint } from '../sessionTerminal';
 import { requireObject, requireString, throwIpcError } from '../../utils/ipcValidate';
+import { getDeviceLinkInvokeContext } from '../../device-link/invoke-context.js';
+import {
+  HISTORY_OBSERVATION_COHERENCE, historyObservationError, readHistoryObservationState,
+  type HistoryObservationState,
+} from '../historyObservationState.js';
 
 const VALID_AGENT_KINDS: readonly HistoryAgentKind[] = ['cc', 'codex', 'pi'];
 const VALID_ORDERS: readonly HistoryOrder[] = ['asc', 'desc'];
@@ -47,6 +52,8 @@ export interface RemoteHistoryMessagesRequest {
   order: HistoryOrder;
   /** Session-reference callers may cap each row before it crosses the relay. Raw MCP reads use null. */
   contentCharLimit: number | null;
+  /** Optional owner-only mutation-checked observation; legacy reads are unchanged. */
+  observation?: { expectedRevision?: string; stateOnly?: boolean };
 }
 
 /** Injectable dependencies keep handler behavior testable without a real Electron DB. */
@@ -54,6 +61,7 @@ export interface RemoteHistoryIpcDeps {
   sessionExists(sessionId: string): Promise<boolean>;
   getMessages(params: GetMessagesParams): ReturnType<typeof getMessagesForHistory>;
   readTerminal(sessionId: string, clearedAt: number | null): Promise<SessionTerminalHint | undefined>;
+  observationState?(sessionId: string): Promise<HistoryObservationState>;
 }
 
 function nullableFiniteNumber(value: unknown, name: string): number | null {
@@ -141,8 +149,20 @@ export function parseRemoteHistoryMessagesRequest(value: unknown): RemoteHistory
     contentCharLimit = input.contentCharLimit;
   }
 
+  let observation: RemoteHistoryMessagesRequest['observation'];
+  if (input.observation !== undefined) {
+    const value = requireObject(input.observation, 'observation');
+    if (includeRewound || Object.keys(value).some(key => !['expectedRevision', 'stateOnly'].includes(key))
+      || (value.stateOnly !== undefined && typeof value.stateOnly !== 'boolean')
+      || (value.expectedRevision !== undefined && (typeof value.expectedRevision !== 'string'
+        || !/^[\w-]{1,256}$/.test(value.expectedRevision))))
+      throwIpcError('INVALID_PARAMS', 'Invalid history observation options');
+    observation = value as RemoteHistoryMessagesRequest['observation'];
+  }
+
   return {
     sessionId,
+    ...(observation ? { observation } : {}),
     workdir: nullableString(input.workdir, 'workdir'),
     fromMs: nullableFiniteNumber(input.fromMs, 'fromMs'),
     toMs: nullableFiniteNumber(input.toMs, 'toMs'),
@@ -279,16 +299,24 @@ const defaultDeps: RemoteHistoryIpcDeps = {
   sessionExists: defaultSessionExists,
   getMessages: getMessagesForHistory,
   readTerminal: readLatestSessionTerminal,
+  observationState: readHistoryObservationState,
 };
 
 /** Register the allowlisted, read-only remote history handler. */
 export function registerRemoteHistoryIpc(deps: RemoteHistoryIpcDeps = defaultDeps): void {
   ipcMain.handle(DL_HISTORY_MESSAGES_CHANNEL, async (_event, value: unknown) => {
     const request = parseRemoteHistoryMessagesRequest(value);
+    if (request.observation && getDeviceLinkInvokeContext()?.sharedTask)
+      throw historyObservationError('COHERENCE_UNSUPPORTED'); // No account-wide activity witness for shared guests.
     if (!(await deps.sessionExists(request.sessionId))) {
       throwIpcError('NOT_FOUND', 'Session does not exist');
     }
-    const page = await deps.getMessages({
+    const state = request.observation
+      ? await (deps.observationState?.(request.sessionId) ?? Promise.reject(historyObservationError('COHERENCE_UNSUPPORTED')))
+      : undefined;
+    if (request.observation?.expectedRevision !== undefined && state?.sourceRevision !== request.observation.expectedRevision)
+      throw historyObservationError('HISTORY_CHANGED');
+    const page = request.observation?.stateOnly ? { items: [], nextCursor: null, hasMore: false } : await deps.getMessages({
       sessionIds: [request.sessionId],
       workdir: request.workdir,
       fromMs: request.fromMs,
@@ -296,25 +324,29 @@ export function registerRemoteHistoryIpc(deps: RemoteHistoryIpcDeps = defaultDep
       agentKind: request.agentKind,
       roles: request.roles,
       includeRewound: request.includeRewound,
+      ...(request.observation ? { respectClearedAt: true } : {}),
       limit: request.limit,
       cursor: request.cursor,
       order: request.order,
     });
-    // 终态标记与页面读取在同一次 handler 调用内完成:跨设备调用方拿到的
-    // terminal 与消息快照来自同一数据库时刻(与本机解析路径的两查询间隔
-    // 同价),不会出现「历史页读完、再探测时源端已写入更新回合的错误行」
-    // 导致的终态错配。错误正文不出被控端,只回安全标记。
+    // Legacy reads are sequential, not atomic. Observation brackets all reads with a
+    // connection-bound database witness; mutations invalidate rather than mix pages.
     // 页面下界是 gte(fromMs),终态探针是 gt(clearedAt)——同一窗口需 fromMs-1。
-    const terminal = await deps.readTerminal(
+    const terminal = request.observation?.stateOnly ? undefined : await deps.readTerminal(
       request.sessionId,
       request.fromMs === null ? null : request.fromMs - 1,
     );
+    const after = state ? await deps.observationState!(request.sessionId) : undefined;
+    if (state && (after?.sourceRevision !== state.sourceRevision || after.clearedAt !== state.clearedAt))
+      throw historyObservationError('HISTORY_CHANGED');
     const preserveStructuredRoles =
       request.roles === null ||
       request.roles.some((role) => role !== 'user' && role !== 'assistant');
     return {
       ...capReferenceHistoryPage(page, request.contentCharLimit, preserveStructuredRoles),
       terminal: terminal ?? null,
+      ...(after ? { ...after, coherence: HISTORY_OBSERVATION_COHERENCE,
+        ...(request.observation?.stateOnly ? { observationStateOnly: true } : {}) } : {}),
     };
   });
 }
