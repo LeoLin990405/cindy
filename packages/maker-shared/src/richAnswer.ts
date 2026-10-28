@@ -139,6 +139,8 @@ export class RichAnswerStream {
   private roots: string[] = [];
   private revision = 0;
   private issues = 0;
+  private failedFinalLine: { offset: number; seq: number; issues: number } | null = null;
+  private sourceTooLong = false;
   update(source: string, complete = false): RichDocument {
     if (!source.startsWith(this.source)) {
       this.source = "";
@@ -147,21 +149,35 @@ export class RichAnswerStream {
       this.nodes = new Map();
       this.roots = [];
       this.issues = 0;
+      this.failedFinalLine = null;
       this.revision++;
+    } else if (this.failedFinalLine && source.length > this.source.length && source.length <= MAX_SOURCE) {
+      // Retry only the failed line. Earlier committed content can differ from
+      // reparsing its source after malformed suffixes were already consumed.
+      this.offset = this.failedFinalLine.offset;
+      this.seq = this.failedFinalLine.seq;
+      this.issues = this.failedFinalLine.issues;
+      this.failedFinalLine = null;
     }
     if (source.length > MAX_SOURCE) {
-      this.issues = Math.max(1, this.issues);
+      this.sourceTooLong = true;
       return this.snapshot();
     }
+    this.sourceTooLong = false;
     this.source = source;
     this.nodes = new Map(this.nodes);
     let end: number;
     while ((end = source.indexOf("\n", this.offset)) !== -1) {
       this.line(source.slice(this.offset, end));
+      this.failedFinalLine = null;
       this.offset = end + 1;
     }
     if (complete && this.offset < source.length) {
-      this.line(source.slice(this.offset));
+      const checkpoint = { offset: this.offset, seq: this.seq, issues: this.issues };
+      const failed = !this.line(source.slice(this.offset));
+      // A suffix after a committed tail is not a whole line and must not be
+      // retried as one when later snapshots extend it.
+      this.failedFinalLine = failed && (this.offset === 0 || source[this.offset - 1] === "\n") ? checkpoint : null;
       this.offset = source.length;
     }
     return this.snapshot();
@@ -171,17 +187,17 @@ export class RichAnswerStream {
       nodes: this.nodes,
       roots: this.roots,
       revision: this.revision,
-      issues: this.issues,
+      issues: this.sourceTooLong ? Math.max(1, this.issues) : this.issues,
     };
   }
-  private line(line: string) {
-    if (!line.trim()) return;
+  private line(line: string): boolean {
+    if (!line.trim()) return true;
     try {
       const op: unknown = JSON.parse(line);
       if (!record(op) || !Number.isSafeInteger(op.seq) || Number(op.seq) < 1)
         throw Error("sequence");
       const seq = Number(op.seq);
-      if (seq <= this.seq) return;
+      if (seq <= this.seq) return true;
       // A malformed or absent line leaves a numbering gap: committed content stays,
       // the missing operations are reported, and later lines still apply.
       this.issues += Math.min(seq - this.seq - 1, MAX_NODES);
@@ -321,8 +337,10 @@ export class RichAnswerStream {
         }
       } else throw Error("operation");
       this.revision++;
+      return true;
     } catch {
       this.issues++;
+      return false;
     }
   }
   private props(v: unknown): Record<string, unknown> {

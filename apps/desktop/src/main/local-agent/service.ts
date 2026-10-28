@@ -24,6 +24,7 @@ import { CURRENT_CINDY_REGION } from '../../shared/brandRegion.js';
 import { isCindyPersonalRuntime } from '../cindy-make/versionRuntimeIdentity.js';
 import { isTrustedAppRendererWindow } from '../security/trustedAppRenderer.js';
 import { localAgentModels } from './catalog.js';
+import { remoteLocalAgentModels } from './remoteCatalog.js';
 import { createLocalAgentServer, LocalAgentError, type LocalAgentServerDeps } from './server.js';
 import { withCrossProcessLock } from '../device-link/crossProcessLock.js';
 import { openLocalAgentRuntime } from './runtime.js';
@@ -32,6 +33,8 @@ import { createLocalAgentObservationHost } from './observationHost.js';
 import { localAgentPermissionConfirmation, localAgentRevokeDetail } from './permissionCopy.js';
 import type { LocalAgentPermission } from '../../shared/localAgent.js';
 import type { SessionQueueInspectionEntry } from '../maker-ipc/sessionQueueInspection.js';
+import { createLocalAgentGroupRouteResolver } from './groupRoute.js';
+import { listProviderGroups } from '../provider-group/store.js';
 
 import { confirmLocalAgent, cancelLocalAgentConfirmations } from './confirmation.js';
 
@@ -141,7 +144,12 @@ export function installLocalAgentHost(
         }).listProviders({
           allowSideEffects: false,
         });
-        return localAgentModels(providers, maker.listAvailableAgents());
+        if (scopeNow() !== scope) throw new LocalAgentError('UNAUTHORIZED', 'Cindy 当前账号已更改，请重新连接。');
+        const localModels = localAgentModels(providers, maker.listAvailableAgents());
+        const remoteModels = await remoteLocalAgentModels(() => scopeNow() === scope, listProviderGroups(), localModels);
+        if (scopeNow() !== scope) throw new LocalAgentError('UNAUTHORIZED', 'Cindy 当前账号已更改，请重新连接。');
+        return [...localModels, ...remoteModels]
+          .map((model, index) => ({ ...model, isDefault: index === 0 }));
       },
       observation: createLocalAgentObservationHost(maker, () => {
         const assertCurrent = () => {
@@ -155,8 +163,24 @@ export function installLocalAgentHost(
         const approved = await confirmLocalAgent(localAgentPermissionConfirmation(client, permissions), signal);
         return approved && !signal.aborted && scopeNow() === scope;
       },
-      open: (input, bridge) =>
-        openLocalAgentRuntime(maker, directory, input, bridge, localAgentMessage),
+      open: async (input, bridge) => {
+        // Load group orchestration only when an application actually opens a
+        // session; the HTTP discovery/startup path must stay lightweight.
+        const [{ getProviderGroupRemoteClient, getProviderGroupApplicationLoad, getProviderGroupRouter }, { getSelfDeviceId }] = await Promise.all([
+          import('../provider-group/runtime.js'), import('../device-link/index.js'),
+        ]);
+        const assertCurrent = () => {
+          if (scopeNow() !== scope) throw new LocalAgentError('UNAUTHORIZED', 'Cindy 当前账号已更改，请重新连接。');
+        };
+        assertCurrent();
+        const load = getProviderGroupApplicationLoad();
+        return openLocalAgentRuntime(maker, directory, input, bridge, localAgentMessage, createLocalAgentGroupRouteResolver({
+          remote: getProviderGroupRemoteClient(),
+          local: getProviderGroupRouter(),
+          localDeviceId: getSelfDeviceId,
+          assertCurrent,
+        }), load.track);
+      },
       message: localAgentMessage,
       warn: (code) => log.warn('local agent request failed', { code }),
       changed: () => {

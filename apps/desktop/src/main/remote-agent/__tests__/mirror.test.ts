@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import type { AgentEvent, AgentSessionHandle } from '@cindy/maker-core';
+import { LOCAL_AGENT_CLIENT, type AgentEvent, type AgentSessionHandle } from '@cindy/maker-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 
@@ -499,6 +499,14 @@ describe('shadow on the other computer', () => {
     expect(input.workspace.homeDir).toBe(os.homedir());
     expect(input.options.userPrompt).toBe(`Please inspect ${path.join(input.shadowDir, 'src', 'index.ts')}.`);
     const opts = hostedStartOptions(input);
+    const application = hostedStartOptions({ ...input,
+      options: { ...input.options, localApplication: { mcpName: 'hhh', hostToolsOnly: true, storageKey: 'a'.repeat(64) } },
+      localApplicationStorage: path.join(root, 'app-runtime'), mcpServers: ['hhh'],
+    });
+    expect(application[LOCAL_AGENT_CLIENT]).toEqual({ url: `${input.tunnel.url}/mcp/hhh`, token: input.tunnel.token,
+      mcpName: 'hhh', hostToolsOnly: true, storageDirectory: path.join(root, 'app-runtime') });
+    expect(application.deviceHosted?.tunnelUrl).toBe(input.tunnel.url);
+    expect(() => hostedStartOptions({ ...input, options: { ...input.options, localApplication: { mcpName: 'hhh', hostToolsOnly: true, storageKey: 'a'.repeat(64) } } })).toThrow('REMOTE_AGENT_INVALID');
     expect(opts.deviceHosted?.workingDir).toBe(input.shadowDir);
     expect(opts.deviceHosted?.pathPlatform).toBe(process.platform);
     expect(opts.deviceHosted?.homeDir).toBeUndefined();

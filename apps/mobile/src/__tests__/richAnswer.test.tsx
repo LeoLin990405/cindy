@@ -68,3 +68,38 @@ it('keeps incomplete and read-only answers from sending', async () => {
   expect(container.querySelector('button')!.disabled).toBe(true);
   expect(send).not.toHaveBeenCalled();
 });
+
+// Tier 1: a completed-looking partial snapshot used to poison the mounted parser.
+// The same answer must recover on its final snapshot without leaving/reopening it.
+it('replaces the incomplete notice with the late full answer without remounting', async () => {
+  const full = JSON.stringify({ version: 1, seq: 1, op: 'create', id: 'answer', kind: 'markdown', props: { text: 'Complete findings' } });
+  const renderSnapshot = async (snapshot: string) => {
+    await act(async () => root.render(createElement(SessionQuickSendProvider, { value: null },
+      createElement(RichAnswer, { source: snapshot, stateKey: 'late-final', complete: true, renderMarkdown: text => text }))));
+  };
+  await renderSnapshot(full.slice(0, -6));
+  expect(container.textContent).toContain('message.richAnswer.incomplete');
+  await renderSnapshot(full);
+  expect(container.textContent).toContain('Complete findings');
+  expect(container.textContent).not.toContain('message.richAnswer.incomplete');
+});
+
+// Tier 1: malformed later suffixes must not erase text already on screen.
+it('keeps committed text visible while malformed suffixes grow without remounting', async () => {
+  const full = JSON.stringify({ version: 1, seq: 1, op: 'create', id: 'answer', kind: 'markdown', props: { text: 'Readable findings' } });
+  for (const suffix of ['', '{', '{"seq":', '{"seq":2']) {
+    await act(async () => root.render(createElement(SessionQuickSendProvider, { value: null },
+      createElement(RichAnswer, { source: full + suffix, stateKey: 'malformed-tail', complete: true, renderMarkdown: text => text }))));
+    expect(container.textContent).toContain('Readable findings');
+    if (suffix) expect(container.textContent).toContain('message.richAnswer.incomplete');
+  }
+  const prefix = full + '{"seq":2' + String.fromCharCode(10);
+  const later = JSON.stringify({ seq: 2, op: 'create', id: 'later', kind: 'markdown', props: { text: 'Later findings' } });
+  for (const tail of [later.slice(0, -6), later]) {
+    await act(async () => root.render(createElement(SessionQuickSendProvider, { value: null },
+      createElement(RichAnswer, { source: prefix + tail, stateKey: 'malformed-tail', complete: true, renderMarkdown: text => text }))));
+    expect(container.textContent).toContain('Readable findings');
+    expect(container.textContent).toContain('message.richAnswer.incomplete');
+  }
+  expect(container.textContent).toContain('Later findings');
+});

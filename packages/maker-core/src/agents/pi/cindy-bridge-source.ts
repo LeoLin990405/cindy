@@ -88,6 +88,9 @@ import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { once } from 'node:events';
+import { connect as connectTcp } from 'node:net';
+import { connect as connectTls } from 'node:tls';
 import path from 'node:path';
 import {
   createBashTool,
@@ -2644,10 +2647,162 @@ function isAllowedMcpUrl(url: URL): boolean {
   return url.protocol === 'http:' && isLoopbackMcpHostname(url.hostname);
 }
 
+/** Authenticated loopback MCP must use a socket, not Bun fetch's environment proxy. */
+async function fetchDirectLoopbackMcp(url: string, headers: Headers, body: string, signal: AbortSignal): Promise<Response> {
+  const parsed = new URL(url);
+  if (!isLoopbackMcpHostname(parsed.hostname)) throw new McpBridgeError('URL outside security boundary');
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  const port = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80));
+  const socket = parsed.protocol === 'https:'
+    ? connectTls({ host, port, servername: host === 'localhost' ? host : undefined })
+    : connectTcp({ host, port });
+  const abort = () => socket.destroy(new Error('request cancelled'));
+  signal.addEventListener('abort', abort, { once: true });
+  if (signal.aborted) abort();
+  const close = () => {
+    signal.removeEventListener('abort', abort);
+    socket.destroy();
+  };
+
+  try {
+    await once(socket, parsed.protocol === 'https:' ? 'secureConnect' : 'connect');
+    const remoteAddress = socket.remoteAddress || '';
+    if (remoteAddress !== '::1' && !/^(?:::ffff:)?127\./i.test(remoteAddress)) {
+      throw new McpBridgeError('URL outside security boundary');
+    }
+    const requestHeaders = new Headers(headers);
+    requestHeaders.set('host', parsed.host);
+    requestHeaders.set('content-length', String(Buffer.byteLength(body)));
+    requestHeaders.set('connection', 'close');
+    requestHeaders.set('accept-encoding', 'identity');
+    requestHeaders.delete('transfer-encoding');
+    const requestPath = (parsed.pathname || '/') + parsed.search;
+    const head = 'POST ' + requestPath + ' HTTP/1.1\r\n'
+      + Array.from(requestHeaders, ([name, value]) => name + ': ' + value + '\r\n').join('')
+      + '\r\n';
+    const iterator = socket[Symbol.asyncIterator]();
+    socket.write(head + body);
+
+    let pending = Buffer.alloc(0);
+    const readMore = async (): Promise<boolean> => {
+      const next = await iterator.next();
+      if (next.done) return false;
+      pending = Buffer.concat([pending, Buffer.from(next.value)]);
+      return true;
+    };
+    let status = 0;
+    let responseHeaders = new Headers();
+    for (;;) {
+      let boundary = pending.indexOf('\r\n\r\n');
+      while (boundary < 0) {
+        if (pending.length > 64 * 1024 || !(await readMore())) throw new Error('invalid HTTP response');
+        boundary = pending.indexOf('\r\n\r\n');
+      }
+      if (boundary > 64 * 1024) throw new Error('invalid HTTP response');
+      const lines = pending.subarray(0, boundary).toString('latin1').split('\r\n');
+      pending = pending.subarray(boundary + 4);
+      const match = /^HTTP\/1\.[01] ([0-9]{3})(?: |$)/.exec(lines.shift() || '');
+      if (!match) throw new Error('invalid HTTP response');
+      status = Number(match[1]);
+      responseHeaders = new Headers();
+      for (const line of lines) {
+        const colon = line.indexOf(':');
+        if (colon < 1) throw new Error('invalid HTTP response');
+        responseHeaders.append(line.slice(0, colon), line.slice(colon + 1).trim());
+      }
+      if (status >= 100 && status < 200 && status !== 101) continue;
+      break;
+    }
+    if (status < 200 || status > 599) throw new Error('invalid HTTP response');
+    if (status === 204 || status === 205 || status === 304) {
+      close();
+      return new Response(null, { status, headers: responseHeaders });
+    }
+
+    const chunked = /(?:^|,)\s*chunked\s*(?:,|$)/i.test(responseHeaders.get('transfer-encoding') || '');
+    const lengthText = responseHeaders.get('content-length');
+    const length = lengthText === null ? null : Number(lengthText);
+    if (!chunked && length !== null && (!Number.isSafeInteger(length) || length < 0)) {
+      throw new Error('invalid HTTP response');
+    }
+    const requireMore = async (): Promise<void> => {
+      if (!(await readMore())) throw new Error('incomplete HTTP response');
+    };
+    async function* readBody(): AsyncGenerator<Uint8Array> {
+      if (chunked) {
+        for (;;) {
+          let end = pending.indexOf('\r\n');
+          while (end < 0) {
+            if (pending.length > 8192) throw new Error('invalid HTTP response');
+            await requireMore();
+            end = pending.indexOf('\r\n');
+          }
+          const sizeText = pending.subarray(0, end).toString('ascii').split(';', 1)[0];
+          pending = pending.subarray(end + 2);
+          if (!/^[0-9a-f]+$/i.test(sizeText)) throw new Error('invalid HTTP response');
+          let remaining = parseInt(sizeText, 16);
+          if (!Number.isSafeInteger(remaining)) throw new Error('invalid HTTP response');
+          if (remaining === 0) return;
+          while (remaining > 0) {
+            if (pending.length === 0) await requireMore();
+            const count = Math.min(remaining, pending.length);
+            yield pending.subarray(0, count);
+            pending = pending.subarray(count);
+            remaining -= count;
+          }
+          while (pending.length < 2) await requireMore();
+          if (pending[0] !== 13 || pending[1] !== 10) throw new Error('invalid HTTP response');
+          pending = pending.subarray(2);
+        }
+      }
+      if (length !== null) {
+        let remaining = length;
+        while (remaining > 0) {
+          if (pending.length === 0) await requireMore();
+          const count = Math.min(remaining, pending.length);
+          yield pending.subarray(0, count);
+          pending = pending.subarray(count);
+          remaining -= count;
+        }
+        return;
+      }
+      if (pending.length) yield pending;
+      for (;;) {
+        const next = await iterator.next();
+        if (next.done) return;
+        yield next.value;
+      }
+    }
+    const chunks = readBody();
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const next = await chunks.next();
+          if (next.done) {
+            close();
+            controller.close();
+          } else {
+            controller.enqueue(next.value);
+          }
+        } catch (error) {
+          close();
+          controller.error(error);
+        }
+      },
+      cancel() { close(); },
+    });
+    return new Response(stream, { status, headers: responseHeaders });
+  } catch (error) {
+    close();
+    throw error;
+  }
+}
+
 class McpHttpClient {
   private nextId = 1;
   private sessionId: string | null = null;
   private readonly requestUrl: string;
+  private readonly directLoopback: boolean;
   private readonly requestTimeoutMs: number;
   private startupDeadlineAt: number | null;
 
@@ -2668,6 +2823,7 @@ class McpHttpClient {
       throw new McpBridgeError('URL outside security boundary');
     }
     this.requestUrl = parsed.href;
+    this.directLoopback = isLoopbackMcpHostname(parsed.hostname);
     const configuredTimeout = server.remote?.requestTimeoutMs;
     this.requestTimeoutMs = Number.isInteger(configuredTimeout)
       && configuredTimeout! > 0
@@ -2730,16 +2886,16 @@ class McpHttpClient {
     if (signal?.aborted) controller.abort();
     const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
     try {
-      const res = await fetch(this.requestUrl, {
-        method: 'POST',
-        headers: this.headers(),
-        body: JSON.stringify(body),
-        redirect: 'error',
-        signal: controller.signal,
-        // Bun's idle timer must not preempt the explicit request deadline while
-        // a local MCP tool is waiting for a user's card interaction.
-        timeout: false,
-      });
+      const headers = this.headers();
+      const payload = JSON.stringify(body);
+      const res = this.directLoopback
+        ? await fetchDirectLoopbackMcp(this.requestUrl, headers, payload, controller.signal)
+        : await fetch(this.requestUrl, {
+          method: 'POST', headers, body: payload, redirect: 'error', signal: controller.signal,
+          // Bun's idle timer must not preempt the explicit request deadline while
+          // a local MCP tool is waiting for a user's card interaction.
+          timeout: false,
+        });
       const sid = res.headers.get('mcp-session-id');
       if (sid) this.sessionId = sid;
       // consume 在同一个 AbortController 生命周期内完成，故 200/SSE 响应头后卡住的

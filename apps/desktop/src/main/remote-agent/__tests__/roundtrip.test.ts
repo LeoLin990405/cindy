@@ -17,10 +17,12 @@ import type {
   SendOptions,
   UserMessage,
 } from '@cindy/maker-core';
-import { MAIN_OWNED_SEND_CONTEXT, Session } from '@cindy/maker-core';
+import { LOCAL_AGENT_CLIENT, MAIN_OWNED_SEND_CONTEXT, Session } from '@cindy/maker-core';
+import { createServer } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { RemoteAgentPoller } from '../controller/poller';
+import { createDeviceAgentStarter } from '../controller/service';
 import { credentialGrantFor, forgetCredentialGrants } from '../executor/credentialGrants';
 import { cancelPendingRemoteStart, startRemoteAgentSession, type StartRemoteAgentDeps } from '../controller/startRemote';
 import { createRemoteAgentHost, type HostedStartInput } from '../host/runHost';
@@ -188,13 +190,14 @@ afterEach(() => {
 function createHost(
   readLimits: () => RemoteAgentLimits = () => DEFAULT_REMOTE_AGENT_LIMITS,
   log?: StartRemoteAgentDeps['log'],
+  start = fakeHostedAgent,
 ) {
   return createRemoteAgentHost({
     readLimits,
     isAgentAvailable: () => true,
     startHosted: async (input) => {
       hostInputs.push(input);
-      return fakeHostedAgent(input);
+      return start(input);
     },
     isControllerAuthorized: () => authorized,
     captureOwner: () => 'owner',
@@ -205,6 +208,68 @@ function createHost(
 }
 
 describe('remote agent round trip', () => {
+  // External application's only MCP traverses the real controller/router/tunnel;
+  // host-only access must reject native tools even if a peer forges a request.
+  it.each(['codex', 'pi', 'claude-code'] as const)('preserves application tools and isolation through %s remote execution', async kind => {
+    const received: string[] = [];
+    const server = createServer((req, res) => {
+      received.push(req.headers.authorization ?? '');
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'app_fixture' }] } }));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    const local = { mcpName: 'hhh', hostToolsOnly: true, groupAssigned: true, storageDirectory: path.join(root, 'application-a'), url: `http://127.0.0.1:${port}`, token: 'application-fixture' };
+    const host = createHost(undefined, undefined, input => {
+      expect(input.options.localApplication).toMatchObject({ mcpName: 'hhh', hostToolsOnly: true });
+      expect(input.localApplicationStorage).toContain('local-applications');
+      expect(input.localApplicationStorage).not.toContain(local.storageDirectory);
+      return fakeHostedAgent(input);
+    });
+    let handle: AgentSessionHandle | undefined;
+    try {
+      const log = { trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {}, child() { return this; } };
+      const prepareMcpBridge = vi.fn(async () => null);
+      const invoke = makeDeps(host).invoke;
+      const start = createDeviceAgentStarter({
+        remoteInvoke: async (deviceId, _channel, args) => {
+          expect(deviceId).toBe('group-member-b');
+          if ((args[0] as { op: string }).op === 'open') expect(args[0]).toMatchObject({ payload: { json: { groupAssigned: true } } });
+          return { ok: true, result: await invoke(args) };
+        },
+        rgPath: () => RG, mcpProviders: () => [], prepareMcpBridge, makerMemory: () => undefined,
+        captureKnownFileBefore: async () => {}, noteOpaqueTurnChange: () => {}, logger: log,
+      });
+      handle = await start({ agentKind: kind, deviceId: 'group-member-b', options: {
+        sessionId: 'external-app', workingDir: project, model: 'm', [LOCAL_AGENT_CLIENT]: local,
+      } });
+      const input = hostInputs[0];
+      const request = async (route: string) => fetch(`${input.tunnel.url}${route}`, { method: 'POST', headers: { authorization: `Bearer ${input.tunnel.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
+      expect(await (await request('/mcp/hhh')).json()).toMatchObject({ result: { tools: [{ name: 'app_fixture' }] } });
+      expect((await request('/exec/fs.read')).status).toBe(403);
+      expect((await request('/mcp/cindy_exec')).status).toBe(403);
+      expect(received).toEqual(['Bearer application-fixture']);
+      expect(prepareMcpBridge).not.toHaveBeenCalled();
+      expect(JSON.stringify(input.options)).not.toContain(local.token);
+    } finally {
+      await handle?.close(); await host.dispose();
+      server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
+  it('rejects an older remote before opening an application session', async () => {
+    const host = createHost(), deps = makeDeps(host), invoke = deps.invoke;
+    deps.invoke = async args => {
+      const result = await invoke(args);
+      if ((args[0] as { op: string }).op === 'caps') delete (result as { localApplication?: boolean }).localApplication;
+      return result;
+    };
+    try {
+      await expect(startRemoteAgentSession('pi', { sessionId: 'old-peer', workingDir: project, model: 'm',
+        [LOCAL_AGENT_CLIENT]: { url: 'http://127.0.0.1:1', token: 'fixture', hostToolsOnly: true } }, deps)).rejects.toThrow('REMOTE_AGENT_PEER_TOO_OLD');
+      expect(hostInputs).toEqual([]);
+    } finally { await host.dispose(); }
+  });
   // 测试价值：真实两端启动入口的诊断协议；此前 24 秒创建等待无阶段记录。
   // 原覆盖只验证执行结果，未保护成功/失败计时及内容不入日志。最小输入：一次启动或 MCP 拒绝。
   // tier: unit，沿用本文件 loopback fixture，不启动真实 Agent、不做真实等待。

@@ -22,7 +22,7 @@ import type {
   PiExtraSpawnConfigContext,
   StartSessionOptions,
 } from '@cindy/maker-core';
-import { resolveMemoryScopeKey } from '@cindy/maker-core';
+import { LOCAL_AGENT_CLIENT, resolveMemoryScopeKey } from '@cindy/maker-core';
 import { createLogger } from '../../logger.js';
 
 import { credentialGrantFor } from '../executor/credentialGrants';
@@ -203,7 +203,8 @@ export function createDeviceAgentStarter(deps: DeviceAgentServiceDeps) {
       pool: poolFor(input.deviceId),
       rgPath: deps.rgPath(),
       codexPath: () => deps.codexPath?.(),
-      ...(sessionId && deps.isGroupAssigned?.(sessionId) ? { groupAssigned: true } : {}),
+      ...(opts[LOCAL_AGENT_CLIENT]?.groupAssigned || (sessionId && deps.isGroupAssigned?.(sessionId))
+        ? { groupAssigned: true } : {}),
       ...(groupSwitch && sessionId
         ? {
             groupSwitch: {
@@ -225,6 +226,11 @@ export function createDeviceAgentStarter(deps: DeviceAgentServiceDeps) {
           }
         : {}),
       prepareMcp: async ({ kind, opts: startOpts, vendorOptions }): Promise<PreparedRemoteMcp> => {
+        const client = startOpts[LOCAL_AGENT_CLIENT];
+        if (client) return {
+          servers: new Map([[client.mcpName ?? 'client', { url: client.url, headers: { authorization: `Bearer ${client.token}` } }]]),
+          dispose() {},
+        };
         const extra = await deps.prepareMcpBridge(deps.mcpProviders(), deps.logger, {
           agentKind: kind,
           sessionId: startOpts.sessionId,
@@ -243,6 +249,7 @@ export function createDeviceAgentStarter(deps: DeviceAgentServiceDeps) {
         };
       },
       capture: ({ kind, opts: startOpts }): ExecutorCaptureHooks | undefined => {
+        if (startOpts[LOCAL_AGENT_CLIENT]) return undefined;
         // Codex 自己报告每轮改动；Claude Code 与 Pi 的写入由执行器在写之前抓取。
         if (kind === 'codex' || !startOpts.sessionId) return undefined;
         const sessionId = startOpts.sessionId;

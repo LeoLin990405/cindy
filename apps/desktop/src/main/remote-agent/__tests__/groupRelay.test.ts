@@ -321,6 +321,20 @@ function switchTokenIn(stream: Awaited<ReturnType<typeof openAsGuest>>['stream']
 }
 
 describe('provider group relay for shared users', () => {
+  it('does not let a group relay discard external application isolation on an older member', async () => {
+    const env = setup({ intercept: async (_device, request, forward) => {
+      const result = await forward();
+      if (request.op === 'caps') delete (result as { localApplication?: boolean }).localApplication;
+      return result;
+    } });
+    try {
+      await expect(openAsGuest(env, GUEST_A, openPayload(SESSION, {
+        options: { localApplication: { mcpName: 'hhh', hostToolsOnly: true, storageKey: 'a'.repeat(64) } }, mcpServers: ['hhh'],
+      }))).rejects.toThrow();
+      expect(env.memberStarted.mini).toHaveLength(0);
+      expect(env.memberStarted.studio).toHaveLength(0);
+    } finally { await env.owner.dispose(); await Promise.all(Object.values(env.members).map(member => member.dispose())); }
+  });
   // Unit regression for provider-sharing.md §3: first local work must reach the member with its push,
   // before either poll batch can report hold. Existing relay cases did not carry this busy-state field.
   // Real guest -> owner Host.handle -> member RunClient.push with JSON serialization on both hops.

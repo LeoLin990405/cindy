@@ -91,6 +91,8 @@ import { ensureProviderGroupUsageReporter, notifyProviderGroupUsage } from '../p
 import { PROVIDER_GROUP_USAGE_ENSURE_INTERVAL_MS, PROVIDER_GROUP_USAGE_STARTUP_DELAY_MS } from '../provider-group/usageReporter.js';
 import {
   getProviderGroupDirectory,
+  getProviderGroupApplicationLoad,
+  setProviderGroupApplicationLoadListener,
   getProviderGroupRemoteClient,
   getProviderGroupRemoteGroups,
   getProviderGroupRouter,
@@ -11535,7 +11537,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     now: () => Date.now(),
     log,
   });
-  setProviderGroupTurnProbe((sessionId) => maker.getSession(sessionId)?.isTurnRunning() ?? false);
+  setProviderGroupTurnProbe((sessionId) => getProviderGroupApplicationLoad().isTurnRunning(sessionId) || (maker.getSession(sessionId)?.isTurnRunning() ?? false));
   // 模型列表把归组的任务显示在组那一项下(provider-groups.md §10)。
   const sessionGroupService = providerGroupService;
   setProviderGroupSessionGroupReader((sessionId) => sessionGroupService.sessionGroup(sessionId));
@@ -11546,21 +11548,25 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   });
   // 这台电脑上每个供应商正在运行一轮的任务数：组里「本机」这台显示它，同账号电脑读目录时也带上(§5)。
   setProviderGroupLocalLoad(() => countProviderRunningTurns({
-    listTurnRunningSessions: () => maker.listActiveSessions().filter((s) => s.isTurnRunning()).map((s) => s.id),
+    // Visible app tasks also live in Maker; the application registry counts them once.
+    listTurnRunningSessions: () => maker.listActiveSessions().filter((s) => s.isTurnRunning() && !hasLocalAgentVisibleRuntime(s.id)).map((s) => s.id),
     readSessionRoutes: readProviderLocalLoadRoutes,
     resolveImplicitProvider: resolveProviderGroupImplicitProvider,
     hostRunningProviders: remoteAgentHostRunningProviders,
+    applicationRunningProviders: () => getProviderGroupApplicationLoad().runningProviders(),
   }));
   // 经另一台电脑上的组运行的任务：开始 / 结束一轮时报告给组所在电脑，让它的分配看到真实负载。
   providerGroupLeaseReporter?.dispose();
   providerGroupLeaseReporter = createProviderGroupLeaseReporter({
-    listRemoteBindings: listRemoteProviderGroupBindings,
-    isTurnRunning: (sessionId) => maker.getSession(sessionId)?.isTurnRunning() ?? false,
+    // One full snapshot per controller: separate reporters would erase each other's leases.
+    listRemoteBindings: () => ({ ...listRemoteProviderGroupBindings(), ...getProviderGroupApplicationLoad().bindings() }),
+    isTurnRunning: (sessionId) => getProviderGroupApplicationLoad().isTurnRunning(sessionId) || (maker.getSession(sessionId)?.isTurnRunning() ?? false),
     send: (ownerDeviceId, seq, entries) => getProviderGroupRemoteClient().leases(ownerDeviceId, seq, entries),
     now: () => Date.now(),
     log,
   });
   const leaseReporter = providerGroupLeaseReporter;
+  setProviderGroupApplicationLoadListener((id) => leaseReporter.notify(id));
   sessionTurnActivityTracker.setSessionTurnChangeListener((sessionId) => leaseReporter.notify(sessionId));
   // 经另一台电脑的组用掉的用量：启动后(账号确定之后)与之后换了账号时，把当前账号还没送到的整份报一次。
   const usageReportTimer = setInterval(() => ensureProviderGroupUsageReporter(), PROVIDER_GROUP_USAGE_ENSURE_INTERVAL_MS);

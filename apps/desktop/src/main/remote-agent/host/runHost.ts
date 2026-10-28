@@ -136,6 +136,8 @@ const STATE_INTERVAL_MS = 2_000;
 const MAX_REMEMBERED_CALLS = 256;
 
 export interface HostedStartInput {
+  /** Host-derived path, scoped to controller/relay/application; never from wire. */
+  localApplicationStorage?: string;
   groupProviderId?: string;
   kind: RemoteAgentKind;
   /** 本机侧的任务 id(由控制端与任务 id 派生，恢复同一任务时不变)。 */
@@ -1390,6 +1392,8 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
           workspace: payload.workspace,
           tunnel: { url: tunnel.url, token: tunnel.token, linkActivity: () => tunnel.linkActivity() },
           mcpServers: payload.mcpServers,
+          ...(payload.options.localApplication ? { localApplicationStorage: path.join(guestHomeFor(guestScopeOf(run.controller, run.relayKey)),
+            'local-applications', payload.options.localApplication.storageKey, run.kind) } : {}),
           ...(run.trust === 'guest' ? { guest: true, ...(guestHome ? { guestHome } : {}), ...(guestProvider ? { guestProvider } : {}) } : {}),
           ...(payload.options.invalidResumeCallback
             ? {
@@ -1944,6 +1948,7 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
         const caps = await RemoteAgentRunClient.caps(connection.invoke);
         backend.modelAccess = caps.relayModelAccess === true && !!deps.providerAccess?.models;
         if (caps.virtualWorkspace !== true
+          || (payload.options.localApplication !== undefined && caps.localApplication !== true)
           || (!backend.modelAccess && deps.providerAccess?.restricted?.(groupProviderId, run.controller))
           || (current.sameAccount ? caps.guestRelay !== true : caps.reshareConsent !== true)) {
           throw new Error('[REMOTE_AGENT_PEER_TOO_OLD] the computer in the provider group cannot take shared tasks yet');
@@ -2656,6 +2661,7 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
           uploadChunkBytes: REMOTE_AGENT_UPLOAD_CHUNK_BYTES,
           maxPayloadBytes: REMOTE_AGENT_MAX_PAYLOAD_BYTES,
           virtualWorkspace: true,
+          localApplication: true,
           ...(deps.forkHosted ? { nativeFork: true } : {}),
           ...(!guest && deps.nativeHistory ? { nativeHistoryTransfer: true } : {}),
           ...(deps.imageArtifacts ? { imageRecovery: true, imageRecoveryRelay: true } : {}),

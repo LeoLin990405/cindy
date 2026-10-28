@@ -23,6 +23,7 @@ import {
   type RemoteAgentStreamItem,
 } from '@cindy/device-link';
 import type { AgentEvent, AgentSessionHandle, Effort, StartSessionOptions } from '@cindy/maker-core';
+import { LOCAL_AGENT_CLIENT } from '@cindy/maker-core';
 import { withTransientRemoteRetry } from '@cindy/maker-shared/device-link-contract';
 
 import { PROVIDER_SHARE_CREDENTIAL_SESSION_APPROVAL } from '../../../shared/providerShareCredentialConsent';
@@ -330,6 +331,8 @@ async function prepareAndStartRemoteAgentSession(
   signal: AbortSignal,
   startupTiming: ReturnType<typeof remoteAgentStartupTiming>,
 ): Promise<AgentSessionHandle> {
+  const client = opts[LOCAL_AGENT_CLIENT];
+  const hostToolsOnly = client?.hostToolsOnly === true;
   // 附加目录(只读引用)与可写目录分开跟踪，运行中任一侧变化都重算执行器根目录：
   // 否则新授予的目录过不了本机 shell/root 判定，撤掉的还被本机上限当可信根。
   let extraDirs = [...new Set(opts.extraDirs ?? [])];
@@ -388,7 +391,7 @@ async function prepareAndStartRemoteAgentSession(
     try { mcp.dispose(); } finally { await executor.close(); }
     throw new Error('[REMOTE_AGENT_EXPIRED] The task has ended on this computer.');
   }
-  const router = createReverseHttpRouter({ executor, mcpTarget: (name) => mcp.servers.get(name) });
+  const router = createReverseHttpRouter({ executor, mcpTarget: (name) => mcp.servers.get(name), hostToolsOnly });
 
   // 连回对方时按最新值打开(换模型、推理强度等在已让出名额时只记在这里)。
   let model = opts.model;
@@ -429,7 +432,7 @@ async function prepareAndStartRemoteAgentSession(
   const stateNow = (): LinkState => linkState;
   const activeNow = (): RemoteAgentRunClient | null => active;
   // Codex：对方的 Codex 把本机当作 exec-server 执行环境。
-  const codexPath = kind === 'codex' ? deps.codexPath?.() : undefined;
+  const codexPath = kind === 'codex' && !hostToolsOnly ? deps.codexPath?.() : undefined;
   const relay = codexPath
     ? new ExecServerRelay({
         codexPath,
@@ -706,31 +709,31 @@ async function prepareAndStartRemoteAgentSession(
     );
     const startOptions = openOptions(reconnect);
     const projectFiles = await timing
-      .measure('project-files', () => deps.collectProjectFiles(opts.workingDir))
+      .measure('project-files', () => hostToolsOnly ? Promise.resolve([]) : deps.collectProjectFiles(opts.workingDir))
       .catch(() => []);
     const ancestorFiles = await timing
       .measure(
         'ancestor-files',
-        () => (deps.collectAncestorFiles?.(opts.workingDir) ?? Promise.resolve([])),
+        () => (!hostToolsOnly && deps.collectAncestorFiles?.(opts.workingDir) || Promise.resolve([])),
       )
       .catch(() => []);
     // 每次打开(含连回)都重新看一遍：上级目录里的标记以这次打开时为准。
     const ancestorMarkers = await timing
       .measure(
         'ancestor-markers',
-        () => (deps.collectAncestorMarkers?.(opts.workingDir) ?? Promise.resolve(undefined)),
+        () => (!hostToolsOnly && deps.collectAncestorMarkers?.(opts.workingDir) || Promise.resolve(undefined)),
       )
       .catch(() => undefined);
     const collectedPersonal = await timing
       .measure(
         'personal-config',
-        () => (deps.collectPersonal?.(kind, projectFiles) ?? Promise.resolve(null)),
+        () => (!hostToolsOnly && deps.collectPersonal?.(kind, projectFiles) || Promise.resolve(null)),
       )
       .catch(() => null);
     personalRoots = collectedPersonal?.roots ?? [];
     const personal = collectedPersonal?.personal ?? { files: [] };
     const importFiles =
-      kind === 'claude-code' && deps.collectImports
+      !hostToolsOnly && kind === 'claude-code' && deps.collectImports
         ? await timing
             .measure('instruction-imports', () =>
               deps.collectImports!({ workingDir: opts.workingDir, projectFiles, ancestorFiles, personal }),
@@ -798,6 +801,9 @@ async function prepareAndStartRemoteAgentSession(
       );
       if (caps.virtualWorkspace !== true) {
         throw new Error('[REMOTE_AGENT_UNSUPPORTED] The other computer does not support the virtual workspace required to protect local paths.');
+      }
+      if (client && caps.localApplication !== true) {
+        throw new Error('[REMOTE_AGENT_PEER_TOO_OLD] Update Cindy on the computer providing this supplier to use it from an external application.');
       }
       deps.pool?.noteMaxRuns(caps.maxRuns);
       deps.pool?.noteIdleReclaimMinutes(caps.idleReclaimMinutes);

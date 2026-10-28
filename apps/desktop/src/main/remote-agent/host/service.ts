@@ -11,6 +11,7 @@ import { nativeHistoryStorage } from '../nativeHistoryStorage';
 
 import { isProviderSharePeer, parseProviderSharePeer } from '@cindy/device-link';
 import type { Maker, StartSessionOptions } from '@cindy/maker-core';
+import { LOCAL_AGENT_CLIENT } from '@cindy/maker-core';
 
 import { createLogger } from '../../logger.js';
 import {
@@ -51,7 +52,17 @@ const log = createLogger('remote-agent:host');
 /** 对方任务的启动选项 → 本机 Agent 的启动选项(工作目录是影子目录，工具经隧道回到对方)。 */
 export function hostedStartOptions(input: HostedStartInput): StartSessionOptions {
   const { options, workspace } = input;
+  const client = options.localApplication;
+  if (client && (!input.localApplicationStorage || !input.mcpServers.includes(client.mcpName))) {
+    throw new Error('[REMOTE_AGENT_INVALID] Missing isolated application tools or storage.');
+  }
   return {
+    ...(client ? { [LOCAL_AGENT_CLIENT]: {
+      url: `${input.tunnel.url.replace(/\/+$/, '')}/mcp/${encodeURIComponent(client.mcpName)}`,
+      token: input.tunnel.token,
+      mcpName: client.mcpName, hostToolsOnly: client.hostToolsOnly,
+      storageDirectory: input.localApplicationStorage,
+    } } : {}),
     sessionId: input.hostSessionId,
     workingDir: input.shadowDir,
     model: options.model,

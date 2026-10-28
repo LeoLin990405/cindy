@@ -21,7 +21,9 @@ function gatewayWithFetch(fetchImpl: typeof fetch) {
     setTimeout, clearTimeout, createHash,
   };
   runInNewContext(compiled, context);
-  const client = new context.Client({ name: 'cindy', url: 'http://127.0.0.1/mcp' }, 'fake-token');
+  // These unit cases inject fetch to verify response and cancellation semantics
+  // on the HTTPS path. Loopback uses a direct socket and is covered by real Pi integration.
+  const client = new context.Client({ name: 'cindy', url: 'https://example.test/mcp' }, 'fake-token');
   client.finishStartup();
   const gateway = new context.Gateway();
   gateway.add('cindy', client, [{ name: 'ghost_call', inputSchema: {

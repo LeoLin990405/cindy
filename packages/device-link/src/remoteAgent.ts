@@ -271,6 +271,8 @@ export interface RemoteAgentForkResult {
 }
 
 export interface RemoteAgentCaps {
+  /** Preserves external-application tools and runtime storage across every relay. */
+  localApplication?: boolean;
   nativeHistoryTransfer?: boolean;
   subscriptionFastPolicy?: true;
   nativeFork?: boolean;
@@ -668,6 +670,7 @@ export function parseRemoteAgentCaps(value: unknown): RemoteAgentCaps {
     uploadChunkBytes: count(v.uploadChunkBytes, REMOTE_AGENT_UPLOAD_CHUNK_BYTES),
     maxPayloadBytes: count(v.maxPayloadBytes, Number.MAX_SAFE_INTEGER),
     ...(v.virtualWorkspace === true ? { virtualWorkspace: true } : {}),
+    ...(v.localApplication === true ? { localApplication: true } : {}),
     ...(v.nativeFork === true ? { nativeFork: true } : {}),
     ...(v.nativeHistoryTransfer === true ? { nativeHistoryTransfer: true } : {}),
     ...(v.imageRecovery === true ? { imageRecovery: true } : {}),

@@ -284,6 +284,43 @@ function createDeferred<T = void>(): {
 }
 
 describe('application-owned session lifecycle', () => {
+  // PR #7697 / 4401270741: visible apps enter createSession, not the already
+  // covered startLocalAgentSession. Unit: no local runtime, a remote handle,
+  // and an application capability must still produce a persisted usable task.
+  it.each(['device-one', 'share:one'])('creates a visible application task on %s without a local engine', async deviceId => {
+    const storage = createStorage(), handle = createHandle({ id: 'remote-visible' });
+    handle.send = vi.fn(async () => {});
+    handle.close = vi.fn(async () => {});
+    const startDeviceAgentSession = vi.fn(async () => handle);
+    const maker = new Maker({ agents: {}, storage, logger: createLogger(), startDeviceAgentSession });
+    try {
+      const session = await maker.createSession({ id: 'visible-client', agentKind: 'codex', workingDir: '/repo',
+        model: 'm', providerId: 'openai', agentDeviceId: deviceId,
+        [LOCAL_AGENT_CLIENT]: { agentDeviceId: deviceId, url: 'http://127.0.0.1:1/mcp/client',
+          token: 'fixture', hostToolsOnly: true } });
+      expect(session.sdkSessionId).toBe('remote-visible');
+      expect(await storage.get('visible-client')).toMatchObject({ agentDeviceId: deviceId, agentKind: 'codex' });
+      await session.send('hello');
+      expect(handle.send).toHaveBeenCalledOnce();
+      expect(startDeviceAgentSession).toHaveBeenCalledOnce();
+      await expect(maker.createSession({ id: 'local-client', agentKind: 'codex', workingDir: '/repo', model: 'm',
+        [LOCAL_AGENT_CLIENT]: { url: 'http://127.0.0.1:1/mcp/client', token: 'fixture', hostToolsOnly: true },
+      })).rejects.toThrow('not registered');
+    } finally { await maker.shutdown(); }
+    expect(handle.close).toHaveBeenCalledOnce();
+  });
+  it('routes an application session to its selected device without requiring a local engine', async () => {
+    const storage = createStorage(), handle = createHandle({ id: 'remote-native' });
+    const startDeviceAgentSession = vi.fn(async () => handle);
+    const maker = new Maker({ agents: {}, storage, logger: createLogger(), startDeviceAgentSession });
+    const opts = { sessionId: 'remote-client', workingDir: '/repo', model: 'm', providerId: 'openai',
+      [LOCAL_AGENT_CLIENT]: { agentDeviceId: 'share:one', url: 'http://127.0.0.1:1/mcp/client', token: 'fixture', hostToolsOnly: true } };
+    const session = await maker.startLocalAgentSession('codex', opts);
+    expect(startDeviceAgentSession).toHaveBeenCalledWith({ agentKind: 'codex', deviceId: 'share:one', options: opts });
+    expect(session.sdkSessionId).toBe('remote-native');
+    expect(await storage.list()).toEqual([]);
+    await maker.shutdown();
+  });
   // Production entry: Maker.startLocalAgentSession. Core rules §1/§2 require the
   // existing Session lifecycle, without creating or enumerating private task rows.
   // Existing createSession tests exercise persistent tasks, not this entry (unit).
