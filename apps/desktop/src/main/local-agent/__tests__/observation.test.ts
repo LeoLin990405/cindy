@@ -8,6 +8,7 @@ import { ipcMain } from 'electron';
 import { DL_HISTORY_MESSAGES_CHANNEL } from '@cindy/device-link';
 import { registerRemoteHistoryIpc } from '../../localDb/ipc/history.js';
 import { readHistoryObservationState } from '../../localDb/historyObservationState.js';
+import { getCurrentDbClientSnapshot } from '../../localDb/client/current.js';
 import { listSessionsForHistory, getMessagesForHistory } from '../../localDb/chatHistoryReader.js';
 import { projectSessionQueueForInspection } from '../../maker-ipc/sessionQueueInspection.js';
 import type { AgentInputQueuedMessage } from '../../../shared/agentInputQueue.js';
@@ -20,6 +21,7 @@ vi.mock('../../localDb/historyObservationState.js', async (importOriginal) => ({
 vi.mock('../../device-link/invoke-context.js', () => ({ getDeviceLinkInvokeContext: () => null }));
 beforeEach(() => {
   vi.mocked(readHistoryObservationState).mockResolvedValue({ sourceRevision: 'fixture-revision', clearedAt: null });
+  vi.mocked(getCurrentDbClientSnapshot).mockReturnValue(null);
 });
 vi.mock('../../localDb/sessionTerminal.js', () => ({ readLatestSessionTerminal: vi.fn() }));
 vi.mock('../../device-link/index.js', () => ({ remoteInvoke: vi.fn() }));
@@ -29,6 +31,7 @@ vi.mock('../../device-link/broadcast-tap.js', () => ({ captureDataOwnerBroadcast
 vi.mock('../../authManager.js', () => ({ getDeviceId: () => 'self' }));
 vi.mock('../../deepLink.js', () => ({ buildHistorySessionDeepLink: vi.fn() }));
 const sourceToken = Buffer.from(JSON.stringify({ c: 1, i: 's::opaque' })).toString('base64url');
+const realHistoryState = await vi.importActual<typeof import('../../localDb/historyObservationState.js')>('../../localDb/historyObservationState.js');
 
 /* Test value: public read entry protects bounded read-only observation, source-local identity,
  * cursor integrity, visibility and revocation (local-agent API + remote/security rules).
@@ -378,6 +381,31 @@ describe('local agent observation read', () => {
     const host = createLocalAgentObservationHost({ listActiveSessions: () => [] } as unknown as Maker, () => current);
     await expect(host.read('observation/history', { deviceId: 'remote', sessionId: 's' }, current))
       .rejects.toMatchObject({ code: 'HISTORY_CHANGED', message: 'HISTORY_CHANGED' });
+  });
+
+  // r4402349422: device-link serializes the message, not an arbitrary Error.code.
+  // Unit regression through the real state helper + registered IPC + public host;
+  // one worker-restart rejection must remain actionable HISTORY_CHANGED, not INTERNAL.
+  it('preserves a remote DB restart classification after the transport drops Error.code', async () => {
+    const handlers = new Map<string, (...args: any[]) => any>();
+    vi.mocked(ipcMain.handle).mockImplementation((channel, handler) => { handlers.set(channel, handler); });
+    vi.mocked(getCurrentDbClientSnapshot).mockReturnValue({ clientEpoch: 1, userId: 'fixture', client: {
+      readHistoryRevision: async () => { throw Object.assign(new Error('history revision connection changed'), { code: 'HISTORY_CHANGED' }); },
+    } } as any);
+    const getMessages = vi.fn(async () => empty as any);
+    registerRemoteHistoryIpc({ sessionExists: async () => true, getMessages, readTerminal: async () => undefined,
+      observationState: realHistoryState.readHistoryObservationState });
+    vi.mocked(handleListDevices).mockResolvedValue({ devices: [{ deviceId: 'remote', name: 'Remote',
+      isSelf: false, online: true, controlEnabled: true, remoteControlEnabled: true, platform: 'macos' } as any] });
+    vi.mocked(remoteInvoke).mockImplementation(async (_device, channel, args) => {
+      if (channel === 'local-db:sessions:get') return { ok: true, result: { id: 's', status: 'active' } };
+      try { return { ok: true, result: await handlers.get(channel)!({}, args[0]) }; }
+      catch (error) { return { ok: false, error: { code: 'IPC_ERROR', message: (error as Error).message } }; }
+    });
+    const host = createLocalAgentObservationHost({ listActiveSessions: () => [] } as unknown as Maker, () => current);
+    await expect(host.read('observation/history', { deviceId: 'remote', sessionId: 's' }, current))
+      .rejects.toMatchObject({ code: 'HISTORY_CHANGED', message: 'HISTORY_CHANGED' });
+    expect(getMessages).not.toHaveBeenCalled();
   });
 
   it('filters hidden and rewound messages, never stringifies tool blocks, and bounds total text', async () => {

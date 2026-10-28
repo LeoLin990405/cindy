@@ -21,6 +21,8 @@ export async function readHistoryObservationState(sessionId: string): Promise<Hi
     catch (error) {
       if ((error as { code?: unknown })?.code === 'HISTORY_REVISION_UNAVAILABLE')
         throw historyObservationError('COHERENCE_UNSUPPORTED');
+      if ((error as { code?: unknown })?.code === 'HISTORY_CHANGED')
+        throw historyObservationError('HISTORY_CHANGED');
       throw error;
     }
   };
