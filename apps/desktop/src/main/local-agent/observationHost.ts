@@ -40,6 +40,35 @@ export function createLocalAgentObservationHost(
         ? classifyRemoteHistoryError(error.code, '').errorCode : 'REMOTE_UNAVAILABLE');
     }
   };
+  // History joins retain tombstones; explicit IDs must obey the live list's visibility too.
+  const assertLiveTargets = async (deviceId: string, sessionIds: string[], assertCurrent: () => void) => {
+    assertCurrent();
+    const assertLive = (value: unknown, id: string) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value))
+        throw new LocalAgentObservationError('NOT_FOUND');
+      const row = value as Record<string, unknown>;
+      if (row.id !== id || (row.status !== 'active' && row.status !== 'archived'))
+        throw new LocalAgentObservationError('NOT_FOUND');
+    };
+    if (deviceId === 'local') {
+      const page = await listSessionsForHistory({
+        sessionIds, includeDeleted: false, workdir: null, fromMs: null, toMs: null,
+        agentKind: null, cursor: null, order: 'desc', limit: sessionIds.length,
+      });
+      assertCurrent();
+      for (const id of sessionIds) assertLive(page.items.find(row => row.id === id), id);
+    } else {
+      // Bound metadata fanout for inspect's at-most-32 explicit targets.
+      for (let offset = 0; offset < sessionIds.length; offset += 4) {
+        await Promise.all(sessionIds.slice(offset, offset + 4).map(async id => {
+          const result = await invoke(deviceId, 'local-db:sessions:get', [id], assertCurrent);
+          assertCurrent();
+          assertLive(result.result, id);
+        }));
+        assertCurrent();
+      }
+    }
+  };
   const remote = (assertCurrent: () => void) => createHistoryRemoteDeps({
     listDevices: () => handleListDevices(defaultDeps()),
     captureAccess: () => assertCurrent,
@@ -82,7 +111,15 @@ export function createLocalAgentObservationHost(
     },
     async history(deviceId, sessionId, args, assertCurrent) {
       // Local IDs are opaque, including IDs containing '::'; never route them by parsing.
-      if (deviceId === 'local') return getMessagesForHistory(args);
+      await assertLiveTargets(deviceId, [sessionId], assertCurrent);
+      assertCurrent();
+      if (deviceId === 'local') {
+        const result = await getMessagesForHistory(args);
+        assertCurrent();
+        await assertLiveTargets(deviceId, [sessionId], assertCurrent);
+        assertCurrent();
+        return result;
+      }
       // Preserve types until the observation boundary filters tools/thinking and hidden inputs.
       // The MCP text-capping adapter flattens objects first and can destroy that evidence.
       const result = await invoke(deviceId, DL_HISTORY_MESSAGES_CHANNEL, [{
@@ -90,18 +127,25 @@ export function createLocalAgentObservationHost(
         agentKind: args.agentKind, roles: args.roles, includeRewound: false,
         limit: args.limit, cursor: args.cursor, order: args.order, contentCharLimit: null,
       }], assertCurrent);
+      await assertLiveTargets(deviceId, [sessionId], assertCurrent);
+      assertCurrent();
       if (Buffer.byteLength(JSON.stringify(result.result)) > 1024 * 1024)
         throw new LocalAgentObservationError('REMOTE_PAYLOAD_TOO_LARGE');
       return result.result;
     },
     async runtime(deviceId, sessionIds, assertCurrent) {
-      if (deviceId === 'local') return {
+      await assertLiveTargets(deviceId, sessionIds, assertCurrent);
+      assertCurrent();
+      const result = deviceId === 'local' ? {
         format: 'active-sessions-v2',
         sessions: maker.listActiveSessions().filter((s) => sessionIds.includes(s.id)).map((s) => ({
           sessionId: s.id, isTurnRunning: s.isTurnRunning(),
         })),
-      };
-      return (await invoke(deviceId, 'maker:list-active', [{ summary: true, snapshotVersion: 2 }], assertCurrent)).result;
+      } : (await invoke(deviceId, 'maker:list-active', [{ summary: true, snapshotVersion: 2 }], assertCurrent)).result;
+      assertCurrent();
+      await assertLiveTargets(deviceId, sessionIds, assertCurrent);
+      assertCurrent();
+      return result;
     },
     ...(readQueue ? { readLocalQueue: readQueue } : {}),
   });

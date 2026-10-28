@@ -7,6 +7,7 @@ import type { Maker } from '@cindy/maker-core';
 import { ipcMain } from 'electron';
 import { DL_HISTORY_MESSAGES_CHANNEL } from '@cindy/device-link';
 import { registerRemoteHistoryIpc } from '../../localDb/ipc/history.js';
+import { listSessionsForHistory, getMessagesForHistory } from '../../localDb/chatHistoryReader.js';
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }));
 vi.mock('../../localDb/client/current.js', () => ({ getDbClient: vi.fn() }));
 vi.mock('../../localDb/sessionTerminal.js', () => ({ readLatestSessionTerminal: vi.fn() }));
@@ -131,8 +132,12 @@ describe('local agent observation read', () => {
     let request: any;
     vi.mocked(remoteInvoke).mockImplementation(async (id, channel, values, options) => {
       expect(id).toBe('remote');
-      expect(channel).toBe(DL_HISTORY_MESSAGES_CHANNEL);
       options?.preSend?.();
+      if (channel === 'local-db:sessions:get') {
+        expect(values).toEqual(['s::opaque']);
+        return { ok: true, result: { id: 's::opaque', status: 'active' } };
+      }
+      expect(channel).toBe(DL_HISTORY_MESSAGES_CHANNEL);
       request = values[0];
       return { ok: true, result: await handlers.get(channel)!({}, request) };
     });
@@ -152,6 +157,75 @@ describe('local agent observation read', () => {
     const queue = await reader.read('observation/inspect', { sessionIds: ['s'] }, current) as any;
     expect(queue.sessions[0].queue).toMatchObject({ count: 1, items: [{ content: '', hidden: true, truncated: true }] });
     expect(JSON.stringify(queue)).not.toContain('private');
+  });
+
+  /* PR7696 P1: cached explicit IDs bypassed tombstone visibility in the real host.
+   * Existing pure reader tests cannot detect that DB join behavior. Minimal input: one
+   * deleted ID, or deletion while history/runtime is pending. Public host/IPC unit tier;
+   * memory sources only, including the real remote history handler above. */
+  it.each(['local', 'remote'])('gates %s history and queue inspection before and after pending reads', async deviceId => {
+    for (const method of ['observation/history', 'observation/inspect'] as const) {
+      for (const deletedBefore of [true, false]) {
+        let deleted = deletedBefore;
+        let release!: () => void;
+        let entered!: () => void;
+        const pending = new Promise<void>(resolve => { release = resolve; });
+        const started = new Promise<void>(resolve => { entered = resolve; });
+        const read = vi.fn(async () => { entered(); await pending; return empty; });
+        const queue = vi.fn(() => [{ queuedMessageId: 'q', position: 0, source: 'user' as const,
+          sourceLabel: null, enqueuedAtMs: 1, consuming: false, content: 'private cached queue' }]);
+        const active = vi.fn(() => { entered(); return []; });
+        vi.mocked(listSessionsForHistory).mockImplementation(async args => {
+          expect(args).toEqual({ sessionIds: ['s::opaque'], includeDeleted: false, workdir: null,
+            fromMs: null, toMs: null, agentKind: null, cursor: null, order: 'desc', limit: 1 });
+          // Hold the local post-runtime metadata check to model deletion before delivery.
+          if (method === 'observation/inspect' && active.mock.calls.length) await pending;
+          return { ...empty, items: deleted ? [] : [{ id: 's::opaque', status: 'active' } as any] };
+        });
+        vi.mocked(getMessagesForHistory).mockImplementation(read);
+        vi.mocked(handleListDevices).mockResolvedValue({ devices: [{ deviceId: 'remote', name: 'Remote',
+          isSelf: false, online: true, controlEnabled: true, remoteControlEnabled: true, platform: 'macos' } as any] });
+        vi.mocked(remoteInvoke).mockImplementation(async (_id, channel, args, options) => {
+          options?.preSend?.();
+          if (channel === 'local-db:sessions:get') {
+            expect(args).toEqual(['s::opaque']);
+            return { ok: true, result: { id: 's::opaque', status: deleted ? 'deleted' : 'active' } };
+          }
+          await read();
+          return { ok: true, result: channel === DL_HISTORY_MESSAGES_CHANNEL ? empty : { format: 'active-sessions-v2', sessions: [] } };
+        });
+        const host = createLocalAgentObservationHost({ listActiveSessions: active } as unknown as Maker, () => current, queue);
+        const result = host.read(method, { deviceId, ...(method === 'observation/history'
+          ? { sessionId: 's::opaque' } : { sessionIds: ['s::opaque'] }) }, current);
+        const rejected = expect(result).rejects.toMatchObject({ code: 'NOT_FOUND', message: 'NOT_FOUND' });
+        if (!deletedBefore) {
+          await started;
+          deleted = true;
+          release();
+        }
+        await rejected;
+        expect(queue).not.toHaveBeenCalled();
+        if (deletedBefore) {
+          expect(read).not.toHaveBeenCalled();
+          expect(active).not.toHaveBeenCalled();
+        }
+      }
+    }
+  });
+
+  it('rejects absent, mismatched and malformed remote target metadata before reading', async () => {
+    for (const metadata of [null, { id: 'other', status: 'active' }, { id: 's' },
+      { id: 's', status: {} }, { id: 's', status: 'unknown' }]) {
+      const history = vi.fn();
+      vi.mocked(remoteInvoke).mockImplementation(async (_id, channel) => {
+        if (channel !== 'local-db:sessions:get') history();
+        return { ok: true, result: metadata };
+      });
+      const host = createLocalAgentObservationHost({ listActiveSessions: () => [] } as unknown as Maker, () => current);
+      await expect(host.read('observation/history', { deviceId: 'remote', sessionId: 's' }, current))
+        .rejects.toMatchObject({ code: 'NOT_FOUND' });
+      expect(history).not.toHaveBeenCalled();
+    }
   });
 
   it('preserves source rowid cursors and binds page tokens to every query dimension', async () => {
