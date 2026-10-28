@@ -197,7 +197,7 @@ export function createLocalAgentObservation(deps: ObservationDeps): LocalAgentOb
           try { entries = supported ? deps.readLocalQueue!(sessionId) : undefined; } catch { entries = undefined; }
           assertCurrent();
           const items = entries?.slice(0, 20).map((entry) => {
-            const hidden = isSyntheticTriggerText(entry.content);
+            const hidden = entry.hidden === true || isSyntheticTriggerText(entry.content);
             const content = hidden ? '' : entry.content.slice(0, Math.min(500, queueTextRemaining));
             queueTextRemaining -= content.length;
             return { queuedMessageId: identifier(entry.queuedMessageId, 'INVALID_RESPONSE'), position: entry.position,

@@ -12,6 +12,8 @@ export interface SessionQueueInspectionEntry {
   sourceLabel: string | null;
   enqueuedAtMs: number | null;
   content: string;
+  /** Host-stamped visibility survives text rewrites; never infer authorship from plain text. */
+  hidden?: true;
   consuming: boolean;
 }
 
@@ -72,6 +74,7 @@ export function projectSessionQueueForInspection(
         item.origin?.kind === 'orca' || item.origin?.kind === 'session'
           ? (item.origin.displayText ?? item.text)
           : item.text,
+      ...(item.autoResume === true || item.originalSyntheticTrigger ? { hidden: true as const } : {}),
       consuming,
     });
   };

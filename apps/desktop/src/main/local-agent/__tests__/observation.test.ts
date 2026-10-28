@@ -8,6 +8,8 @@ import { ipcMain } from 'electron';
 import { DL_HISTORY_MESSAGES_CHANNEL } from '@cindy/device-link';
 import { registerRemoteHistoryIpc } from '../../localDb/ipc/history.js';
 import { listSessionsForHistory, getMessagesForHistory } from '../../localDb/chatHistoryReader.js';
+import { projectSessionQueueForInspection } from '../../maker-ipc/sessionQueueInspection.js';
+import type { AgentInputQueuedMessage } from '../../../shared/agentInputQueue.js';
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }));
 vi.mock('../../localDb/client/current.js', () => ({ getDbClient: vi.fn() }));
 vi.mock('../../localDb/sessionTerminal.js', () => ({ readLatestSessionTerminal: vi.fn() }));
@@ -157,6 +159,30 @@ describe('local agent observation read', () => {
     const queue = await reader.read('observation/inspect', { sessionIds: ['s'] }, current) as any;
     expect(queue.sessions[0].queue).toMatchObject({ count: 1, items: [{ content: '', hidden: true, truncated: true }] });
     expect(JSON.stringify(queue)).not.toContain('private');
+  });
+
+  it('redacts host continuations through the real queue projector without hiding matching human text', async () => {
+    // PR7696 P1: the projector dropped autoResume before the observation visibility check.
+    const queued = (clientId: string, value: string, flags: Partial<AgentInputQueuedMessage> = {}): AgentInputQueuedMessage => ({
+      clientId, text: value, persistedContent: value, model: 'test-model', effort: 'medium',
+      permissionMode: 'auto', workingDir: '/repo',
+      chatMessage: { clientId, role: 'user', content: value },
+      createOpts: { agentKind: 'pi', workingDir: '/repo', model: 'test-model' }, ...flags,
+    });
+    const pending = [queued('auto-en', 'continue', { autoResume: true }),
+      queued('auto-zh', '继续', { autoResume: true }),
+      queued('rewritten', 'rewritten instruction', { originalSyntheticTrigger: 'generic' }),
+      queued('human', 'continue')];
+    const { reader } = setup({ readLocalQueue: () => projectSessionQueueForInspection(pending, ['auto-en']) });
+    const result = await reader.read('observation/inspect', { sessionIds: ['s'] }, current) as any;
+    expect(result.sessions[0].queue).toMatchObject({ count: 4, truncated: true, items: [
+      { queuedMessageId: 'auto-en', position: 0, consuming: true, hidden: true, content: '', truncated: true },
+      { queuedMessageId: 'auto-zh', position: 1, consuming: false, hidden: true, content: '', truncated: true },
+      { queuedMessageId: 'rewritten', position: 2, consuming: false, hidden: true, content: '', truncated: true },
+      { queuedMessageId: 'human', position: 3, consuming: false, content: 'continue', truncated: false },
+    ] });
+    expect(result.sessions[0].queue.items[3]).not.toHaveProperty('hidden');
+    expect(result.partial).toBe(true);
   });
 
   /* PR7696 P1: cached explicit IDs bypassed tombstone visibility in the real host.
