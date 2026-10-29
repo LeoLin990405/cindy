@@ -7,14 +7,14 @@
   <title>Cindy · 供应商设置设计预览 · 评审修订版</title>
   <style>
     /* Isolated prototype palette; production consumes the generated theme tokens. */
-    :root {
+    :root, [data-preview-theme="light"] {
       color-scheme: light;
       --surface: #f8f8f6; --card: #fff; --ink: #262626; --muted: #646460;
       --border: #d7d7d4; --chip: #e5e5e3; --hover: rgb(0 0 0 / .05); --selected: rgb(0 0 0 / .11);
       --focus: #417cdd; --error: #b42332; --inverse: #262626; --inverse-ink: #fff;
       --scrim: rgb(0 0 0 / .5);
     }
-    :root[data-theme="dark"] {
+    :root[data-theme="dark"], [data-preview-theme="dark"] {
       color-scheme: dark;
       --surface: #1f1f1e; --card: #2c2c2a; --ink: #e8e8e5; --muted: #b2b2ad;
       --border: #454540; --chip: #3c3c3a; --hover: rgb(255 255 255 / .05); --selected: rgb(255 255 255 / .11);
@@ -92,7 +92,9 @@
     .editor { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 18px; }
     .readout { padding-top: 10px; font-size: 14px; font-variant-numeric: tabular-nums; }
     .task-list { display: grid; gap: 5px; }
-    .task { display: block; width: 100%; text-align: left; border-color: transparent; border-radius: 9999px; background: transparent; padding: 11px 16px; min-width: 0; }
+    .selection-preview { margin-top: 20px; padding: 22px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--ink); }
+    .selection-preview > .row { margin-bottom: 18px; }
+    .task { display: block; width: 100%; text-align: left; border: 1px solid transparent; border-radius: 9999px; background: transparent; padding: 11px 16px; min-width: 0; font-size: 13px; font-weight: 500; }
     .task small { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
     .task.active { background: var(--selected); font-weight: 600; }
     .task.old-active { background: var(--inverse); color: var(--inverse-ink); font-weight: 600; }
@@ -120,6 +122,7 @@
       .compare, .section-head { grid-template-columns: 1fr; gap: 18px; }
       .wrap { padding: 0 18px; } .top { padding: 14px 18px; }
       .hero { padding-top: 28px; } .body { padding: 18px; }
+      .selection-preview { padding: 14px; }
       section { padding: 28px 0; } .panel-title { padding: 14px 18px; }
       .top .tag { display: none; } h2 { font-size: 22px; }
       .dialog-header { padding: 18px 18px 12px; }
@@ -226,10 +229,20 @@
     </section>
 
     <section id="selection">
-      <div class="section-head"><div><div class="eyebrow">05 / 保留清晰的选中位置</div><h2>背景柔和，状态仍然明确。</h2></div><p>选中、悬停与键盘焦点分别表达。右上角可以切换深浅色；标题、副标题同步配对调整。</p></div>
-      <div class="compare">
-        <div class="panel"><div class="panel-title"><h3>原效果方向</h3><span class="tag">反馈示意</span></div><div class="body task-list"><div class="task">整理今天的想法<small>刚刚更新</small></div><div class="task old-active">供应商设置改版<small>当前任务 · 阅读方案</small></div><div class="task">检查项目进度<small>昨天</small></div></div></div>
-        <div class="panel"><div class="panel-title"><h3>改版方向</h3><span class="tag">可点击切换</span></div><div class="body task-list" id="task-list"><button class="task" aria-pressed="false">整理今天的想法<small>刚刚更新</small></button><button class="task active" aria-pressed="true">供应商设置改版<small>当前任务 · 阅读方案</small></button><button class="task" aria-pressed="false">检查项目进度<small>昨天</small></button></div></div>
+      <div class="section-head"><div><div class="eyebrow">05 / 保留清晰的选中位置</div><h2>背景柔和，状态仍然明确。</h2></div><p>黑夜与日间效果同时展示，无需切换页面主题。点击调整后的任务，两种模式同步选中，方便比较。</p></div>
+      <div class="selection-preview" id="selection-dark" data-preview-theme="dark" role="group" aria-labelledby="selection-dark-title">
+        <div class="row"><h3 id="selection-dark-title">黑夜模式</h3><p class="caption">选中底轻微提亮，避免大面积近白色。</p></div>
+        <div class="compare">
+          <div class="panel"><div class="panel-title"><strong>调整前</strong><span class="tag">反馈示意</span></div><div class="body task-list"><div class="task">整理今天的想法<small>刚刚更新</small></div><div class="task old-active">供应商设置改版<small>当前任务 · 阅读方案</small></div><div class="task">检查项目进度<small>昨天</small></div></div></div>
+          <div class="panel"><div class="panel-title"><strong>调整后</strong><span class="tag">可点击切换</span></div><div class="body task-list" id="task-list-dark" data-task-list><button class="task" aria-pressed="false">整理今天的想法<small>刚刚更新</small></button><button class="task active" aria-pressed="true">供应商设置改版<small>当前任务 · 阅读方案</small></button><button class="task" aria-pressed="false">检查项目进度<small>昨天</small></button></div></div>
+        </div>
+      </div>
+      <div class="selection-preview" id="selection-light" data-preview-theme="light" role="group" aria-labelledby="selection-light-title">
+        <div class="row"><h3 id="selection-light-title">日间模式</h3><p class="caption">选中底轻微加深，文字保持清晰。</p></div>
+        <div class="compare">
+          <div class="panel"><div class="panel-title"><strong>调整前</strong><span class="tag">反馈示意</span></div><div class="body task-list"><div class="task">整理今天的想法<small>刚刚更新</small></div><div class="task old-active">供应商设置改版<small>当前任务 · 阅读方案</small></div><div class="task">检查项目进度<small>昨天</small></div></div></div>
+          <div class="panel"><div class="panel-title"><strong>调整后</strong><span class="tag">可点击切换</span></div><div class="body task-list" id="task-list" data-task-list><button class="task" aria-pressed="false">整理今天的想法<small>刚刚更新</small></button><button class="task active" aria-pressed="true">供应商设置改版<small>当前任务 · 阅读方案</small></button><button class="task" aria-pressed="false">检查项目进度<small>昨天</small></button></div></div>
+        </div>
       </div>
       <p class="note">此方向会改变 DESIGN §15.10 当前登记的反色选中规则，待审阅确认。这里演示 11% 墨色填充；真实侧栏还需核验橙色运行图标、PR 状态及手机端，不代表最终主题定稿。</p>
     </section>
@@ -552,9 +565,12 @@
     $('context-editor').onsubmit = (event) => {
       event.preventDefault(); if (!commitContextDraft()) $('context-input').focus();
     };
-    $('task-list').querySelectorAll('button').forEach(button => button.onclick = () => {
-      $('task-list').querySelectorAll('button').forEach(item => { item.classList.toggle('active', item === button); item.setAttribute('aria-pressed', String(item === button)); });
-    });
+    const taskLists = [...document.querySelectorAll('[data-task-list]')];
+    taskLists.forEach(list => list.querySelectorAll('button').forEach((button, index) => button.onclick = () => {
+      taskLists.forEach(target => target.querySelectorAll('button').forEach((item, i) => {
+        item.classList.toggle('active', i === index); item.setAttribute('aria-pressed', String(i === index));
+      }));
+    }));
   </script>
 </body>
 </html>
