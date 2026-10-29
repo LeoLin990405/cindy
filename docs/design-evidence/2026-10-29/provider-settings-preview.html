@@ -65,6 +65,9 @@
     .old-block { border: 1px dashed var(--border); padding: 12px 14px; border-radius: 12px; font-size: 13px; margin-top: 12px; }
     .pills { display: flex; gap: 6px; flex-wrap: wrap; }
     .pills span { border-radius: 9999px; background: var(--surface); padding: 3px 9px; font-size: 12px; }
+    .context-presets button::before { content: '✓'; display: inline-block; width: 1.2em; opacity: 0; }
+    .context-presets button[aria-pressed="true"] { background: var(--selected); border-color: var(--ink); }
+    .context-presets button[aria-pressed="true"]::before { opacity: 1; }
     .ghost-field { padding: 8px 12px; border: 1px solid var(--border); border-radius: 9999px; margin-top: 8px; color: var(--muted); font-size: 12px; }
     details { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px; }
     summary { font-size: 13px; font-weight: 500; min-height: 36px; }
@@ -203,24 +206,28 @@
     </section>
 
     <section id="context">
-      <div class="section-head"><div><div class="eyebrow">04 / 先看懂，再调整</div><h2>数字写得自然，保存方式保持一致。</h2></div><p>自动表示跟随当前默认。有效修改在失焦或按 Enter 时保存；非法输入留在原处。Esc 只放弃尚未保存的输入。</p></div>
+      <div class="section-head"><div><div class="eyebrow">04 / 先看懂，再调整</div><h2>常用额度直接选，精确数值也能填。</h2></div><p>快捷选项点击即保存，手动输入在失焦或按 Enter 时保存。自动表示跟随当前默认；非法输入留在原处，Esc 只放弃尚未保存的输入。</p></div>
       <div class="compare">
         <div class="panel"><div class="panel-title"><h3>已核实的问题</h3></div><div class="body"><div class="row"><span>手输 256K</span><strong>256,000 tokens</strong></div><div class="kv"><span>点击旧「256K」预设</span><strong>262,144 tokens</strong></div><p class="note">同一个控件用了两种 K；点预设后输入框还会显示为 262。修改方案保留精确额度，用准确标签消除歧义。</p><div class="kv"><span>同时区分</span><strong>使用多少 / 最多支持多少</strong></div><p class="note">默认值为什么较小，应按真实策略解释，不能无依据承诺更快或更省钱。右侧是虚构模型，实际接入上限必须另行确认。</p></div></div>
         <div class="panel"><div class="panel-title"><h3>示例模型 A · 上下文</h3><span class="tag">可操作</span></div><div class="body">
           <div class="row"><div><p class="caption">使用上限</p><p id="context-value" class="context-value">自动 · 200,000 tokens</p></div><button id="adjust-context" aria-expanded="false" aria-controls="context-editor">调整</button></div>
           <div class="kv"><span>模型最大容量</span><strong>1,050,000 tokens</strong></div>
           <p class="note">本例假设当前接入已确认支持 1,050,000 tokens。</p>
-          <div class="footer"><button type="button" id="use-capacity">使用当前接入上限</button></div>
           <p id="context-note" class="note">自动跟随当前默认使用上限。</p>
           <form id="context-editor" class="editor" hidden novalidate>
             <div id="custom-context" class="stack">
-              <label class="field">自定义上限<input id="context-input" value="200000" maxlength="96" aria-describedby="parsed context-help" autocomplete="off" spellcheck="false"></label>
+              <div class="field"><p id="context-presets-label">快捷选择 · tokens</p><div class="pills context-presets" role="group" aria-labelledby="context-presets-label">
+                <button type="button" id="restore-context" aria-pressed="true">跟随默认 · 200,000</button>
+                <button type="button" data-preset="262144" aria-pressed="false">262,144</button>
+                <button type="button" data-preset="1000000" aria-pressed="false">1,000,000</button>
+                <button type="button" id="use-capacity" aria-pressed="false">接入上限 · 1,050,000</button>
+              </div></div>
+              <label class="field">或输入自定义上限<input id="context-input" value="200000" maxlength="96" aria-describedby="parsed context-help" autocomplete="off" spellcheck="false"></label>
               <p id="context-help" class="caption">支持 1M、100万或 1000000；失焦或按 Enter 保存。</p>
-              <div class="pills"><button type="button" data-preset="262144">262,144 tokens</button><button type="button" data-preset="1000000">1M · 1,000,000 tokens</button></div>
             </div>
             <p class="readout" id="parsed" aria-live="polite"></p>
             <p class="note">提高数值不会扩展模型能力；实际生效还受当前任务和引擎限制。本预览演示格式换算，不验证真实接入能力。</p>
-            <div class="footer"><button type="button" id="restore-context">恢复自动</button><button class="primary" type="button" id="done-context">完成</button></div>
+            <div class="footer"><button class="primary" type="button" id="done-context">完成</button></div>
           </form>
           <p class="status" id="context-status" aria-live="polite"></p>
           <details><summary>高级设置<small>自动压缩、接口选择与其他模型覆盖</small></summary><p class="note">实际配置规则不因输入方式变化而改变。有自定义时点名提示；资料未知时明确显示未知，不用型号名称猜测。</p></details>
@@ -509,12 +516,18 @@
     }
     let contextSaved = { mode: 'default', tokens: 200000 };
     let contextDirty = false, contextBaseline = '200000';
+    const contextChoices = [...document.querySelectorAll('.context-presets button')];
     function updateContextDraft() {
       const value = parseTokens($('context-input').value);
       $('parsed').textContent = value === null ? '请输入正整数 token 数，或 1M、100万等有效写法。' :
         '= ' + value.toLocaleString('en-US') + ' tokens · 精确换算';
       $('parsed').classList.toggle('error', value === null);
       $('context-input').setAttribute('aria-invalid', String(value === null));
+      contextChoices.forEach(button => {
+        const selected = contextSaved.mode === 'default' ? button.id === 'restore-context' :
+          button.id !== 'restore-context' && contextSaved.tokens === (button.id === 'use-capacity' ? 1050000 : Number(button.dataset.preset));
+        button.setAttribute('aria-pressed', String(!contextDirty && selected));
+      });
       return value;
     }
     function applyContext(mode, tokens, replaceInput = false) {
@@ -522,7 +535,7 @@
       if (replaceInput) $('context-input').value = String(tokens);
       contextBaseline = $('context-input').value;
       $('context-value').textContent = (mode === 'default' ? '自动' : '自定义') + ' · ' + tokens.toLocaleString('en-US') + ' tokens';
-      $('context-note').textContent = mode === 'default' ? '自动跟随当前默认使用上限。' : '已自定义使用上限；恢复自动后将重新跟随默认。';
+      $('context-note').textContent = mode === 'default' ? '自动跟随当前默认使用上限。' : '已固定使用上限；选择「跟随默认」可恢复自动。';
       updateContextDraft(); $('context-status').textContent = '已保存到本页示例，真实任务未改变。';
     }
     function commitContextDraft() {
