@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Cindy · 供应商设置设计预览 V2</title>
+  <style>
+    /* Isolated prototype palette; production consumes the generated theme tokens. */
+    :root {
+      color-scheme: light;
+      --surface: #f8f8f6; --card: #fff; --ink: #262626; --muted: #646460;
+      --border: #d7d7d4; --chip: #e5e5e3; --hover: #efefec; --selected: #e2e2df;
+      --focus: #417cdd; --error: #b42332; --inverse: #262626; --inverse-ink: #fff;
+      --scrim: rgb(0 0 0 / .5);
+    }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --surface: #1f1f1e; --card: #2c2c2a; --ink: #e8e8e5; --muted: #b2b2ad;
+      --border: #454540; --chip: #3c3c3a; --hover: #30302e; --selected: #3d3d39;
+      --error: #ff9ba6; --inverse: #eeeeec; --inverse-ink: #202020;
+      --scrim: rgb(0 0 0 / .7);
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--surface); color: var(--ink); font: 15px/1.65 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, input, select { font: inherit; color: inherit; }
+    button, summary { cursor: pointer; }
+    button { border: 1px solid var(--border); border-radius: 9999px; background: var(--card); padding: 7px 16px; font-size: 13px; font-weight: 500; min-height: 36px; }
+    button:hover { background: var(--hover); }
+    button:disabled { opacity: .55; cursor: default; }
+    button.primary { background: var(--chip); border-color: var(--chip); }
+    :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+    input, select { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 9999px; background: var(--card); padding: 7px 13px; min-height: 36px; font-size: 13px; }
+    input[aria-invalid="true"] { border-color: var(--error); }
+    input[type="checkbox"] { width: 18px; min-height: 18px; flex-shrink: 0; accent-color: var(--ink); }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: clamp(28px, 4vw, 44px); line-height: 1.25; letter-spacing: -1px; font-weight: 600; }
+    h2 { font-size: 24px; line-height: 1.4; letter-spacing: -.4px; }
+    h3 { font-size: 16px; font-weight: 600; }
+    a { color: inherit; text-underline-offset: 4px; }
+    header { border-bottom: 1px solid var(--border); }
+    .top { max-width: 1180px; margin: auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 28px; }
+    .brand { letter-spacing: 2px; font-weight: 600; }
+    .caption { color: var(--muted); font-size: 12px; }
+    .tag { display: inline-block; border: 1px solid var(--border); border-radius: 9999px; padding: 2px 10px; font-size: 11px; white-space: nowrap; }
+    .wrap { max-width: 1180px; margin: auto; padding: 0 28px; }
+    .hero { padding: 42px 0 26px; max-width: 790px; }
+    .hero > p { margin-top: 16px; color: var(--muted); }
+    .eyebrow { font-size: 12px; letter-spacing: 1.5px; color: var(--muted); margin-bottom: 12px; }
+    nav { display: flex; gap: 8px; flex-wrap: wrap; padding-bottom: 26px; }
+    nav a { font-size: 13px; text-decoration: none; border-bottom: 1px solid var(--border); padding: 8px 6px; }
+    section { padding: 32px 0 38px; border-top: 1px solid var(--border); scroll-margin-top: 16px; }
+    .section-head { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-bottom: 22px; align-items: end; }
+    .section-head > p { color: var(--muted); font-size: 14px; }
+    .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+    .panel { background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; min-width: 0; }
+    .panel-title { padding: 16px 22px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .body { padding: 22px; }
+    .stack { display: grid; gap: 14px; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .field { display: grid; gap: 6px; font-size: 13px; }
+    .footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 18px; flex-wrap: wrap; }
+    .note { font-size: 13px; color: var(--muted); margin-top: 14px; }
+    .old-block { border: 1px dashed var(--border); padding: 12px 14px; border-radius: 12px; font-size: 13px; margin-top: 12px; }
+    .pills { display: flex; gap: 6px; flex-wrap: wrap; }
+    .pills span { border-radius: 9999px; background: var(--surface); padding: 3px 9px; font-size: 12px; }
+    .ghost-field { padding: 8px 12px; border: 1px solid var(--border); border-radius: 9999px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+    details { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px; }
+    summary { font-size: 13px; font-weight: 500; min-height: 36px; }
+    summary small { display: block; color: var(--muted); font-weight: 400; margin: 3px 0 0 15px; }
+    .detail-body { padding-top: 12px; display: grid; gap: 14px; }
+    .engine { padding: 12px 0; border-bottom: 1px solid var(--border); }
+    .engine:last-child { border: 0; }
+    .engine p { font-size: 12px; overflow-wrap: anywhere; margin-top: 6px; }
+    .toggle { display: flex; gap: 10px; align-items: center; min-height: 44px; font-size: 13px; }
+    .impact { font-size: 12px; background: var(--surface); padding: 12px; border-radius: 12px; margin-top: 16px; overflow-wrap: anywhere; }
+    .error { color: var(--error); font-size: 12px; }
+    .model-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 17px 0; border-bottom: 1px solid var(--border); }
+    .model-row:last-child { border: 0; }
+    .model-row strong { font-size: 14px; }
+    .model-row p { font-size: 12px; color: var(--muted); }
+    .model-row > div { min-width: 0; overflow-wrap: anywhere; }
+    .model-row button { flex-shrink: 0; }
+    .path-item { border-bottom: 1px solid var(--border); padding: 18px 0; }
+    .path-item p { font-size: 13px; color: var(--muted); margin-top: 6px; }
+    .path-item:first-child { padding-top: 0; }
+    .flow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; margin-top: 14px; }
+    .flow span { border: 1px solid var(--border); border-radius: 9999px; padding: 5px 12px; }
+    .kv { display: flex; justify-content: space-between; gap: 15px; padding: 12px 0; border-bottom: 1px solid var(--border); font-size: 13px; flex-wrap: wrap; }
+    .context-value { font-size: 21px; font-weight: 500; margin-top: 6px; font-variant-numeric: tabular-nums; }
+    .editor { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 18px; }
+    .readout { padding-top: 10px; font-size: 14px; font-variant-numeric: tabular-nums; }
+    .task-list { display: grid; gap: 5px; }
+    .task { display: block; width: 100%; text-align: left; border-color: transparent; border-radius: 9999px; background: transparent; padding: 11px 16px; min-width: 0; }
+    .task small { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
+    .task.active { background: var(--selected); font-weight: 600; }
+    .task.old-active { background: var(--inverse); color: var(--inverse-ink); font-weight: 600; }
+    .task.old-active small { color: inherit; }
+    .task:hover:not(.active):not(.old-active) { background: var(--hover); }
+    .end { padding: 24px 0 40px; color: var(--muted); font-size: 12px; }
+    .status { font-size: 12px; margin-top: 10px; color: var(--muted); }
+    .status:empty { display: none; }
+    .more { border: 0; margin: 0; padding: 0; }
+    .more summary { list-style: none; border: 1px solid var(--border); border-radius: 9999px; padding: 6px 13px; }
+    .more summary::-webkit-details-marker { display: none; }
+    .more button { margin-top: 8px; }
+    dialog { color: var(--ink); background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 0; width: min(600px, calc(100vw - 32px)); max-height: min(640px, 85dvh); overflow: hidden; }
+    dialog::backdrop { background: var(--scrim); }
+    .dialog-frame { display: flex; flex-direction: column; max-height: min(638px, 84dvh); }
+    .dialog-header { padding: 22px 22px 12px; }
+    .dialog-body { padding: 0 22px 16px; overflow: auto; min-height: 0; }
+    .dialog-footer { padding: 12px 22px 20px; border-top: 1px solid var(--border); flex-shrink: 0; }
+    .catalog { max-height: 220px; overflow: auto; border-block: 1px solid var(--border); margin-top: 14px; }
+    .checkrow { display: flex; gap: 10px; align-items: center; padding: 12px 0; font-size: 13px; }
+    .checkrow > span { min-width: 0; overflow-wrap: anywhere; }
+    .checkrow small { display: block; color: var(--muted); }
+    .manual-entry { padding-top: 14px; }
+    @media (max-width: 720px) {
+      .compare, .section-head { grid-template-columns: 1fr; gap: 18px; }
+      .wrap { padding: 0 18px; } .top { padding: 14px 18px; }
+      .hero { padding-top: 28px; } .body { padding: 18px; }
+      section { padding: 28px 0; } .panel-title { padding: 14px 18px; }
+      .top .tag { display: none; } h2 { font-size: 22px; }
+      .dialog-header { padding: 18px 18px 12px; }
+      .dialog-body { padding-inline: 18px; } .dialog-footer { padding: 12px 18px 18px; }
+      button { min-height: 44px; } .more summary { min-height: 44px; }
+    }
+  </style>
+</head>
+<body>
+  <header><div class="top"><span class="brand">CINDY <span class="tag">DESIGN STUDY · V2</span></span><button id="theme">切换深色</button></div></header>
+  <main class="wrap">
+    <div class="hero">
+      <div class="eyebrow">供应商与模型设置 / 第二版</div>
+      <h1>填好连接，就能选模型。</h1>
+      <p>普通配置一步一步完成；特殊设置按需展开。第二版把默认界面再收简，让用户先看到要做的事。</p>
+      <p class="caption">草稿 PR #7735 的独立预览，应用尚未修改。所有数据均为示例，保存只影响当前页面；不输入真实凭证、不发起网络请求。</p>
+    </div>
+    <nav aria-label="设计章节"><a href="#journey">首次与日常</a><a href="#connection">连接设置</a><a href="#models">添加模型</a><a href="#context">上下文</a><a href="#selection">选中态</a></nav>
+
+    <section id="journey">
+      <div class="section-head"><div><div class="eyebrow">01 / 先分清使用场景</div><h2>第一次带着走，日后直达修改。</h2></div><p>连接与模型分开管理，同时保留第一次接入的完整引导。</p></div>
+      <div class="compare">
+        <div class="panel"><div class="body"><h3>第一次接入</h3><div class="flow"><span>选择来源</span>→<span>连接</span>→<span>选择模型</span>→<span>完成</span></div><p class="note">保存连接后继续选模型。如果选择稍后添加，明确显示“还没有可用模型”，保留添加入口。</p></div></div>
+        <div class="panel"><div class="body"><h3>已有连接，日常维护</h3><div class="flow"><span>换地址或 Key → 编辑连接</span><span>增加型号 → 添加模型</span></div><p class="note">不重复走引导，也不让用户为了更换 Key 重新面对一整套模型参数。</p></div></div>
+      </div>
+    </section>
+
+    <section id="connection">
+      <div class="section-head"><div><div class="eyebrow">02 / 不必先懂继承关系</div><h2>默认只填地址和 Key。</h2></div><p>有例外时直接写“Codex 使用单独地址”。参数可以收起，当前问题和修改影响必须看得见。</p></div>
+      <div class="compare">
+        <div class="panel"><div class="panel-title"><h3>原结构</h3><span class="tag">源码概括</span></div><div class="body">
+          <div class="pills"><span>Claude Code</span><span>Codex</span><span>Pi</span></div>
+          <div class="old-block"><strong>每个引擎的连接</strong><div class="ghost-field">服务地址</div><div class="ghost-field">API key</div></div>
+          <div class="old-block"><strong>模型编辑</strong><p class="caption">型号 ID、模型类型、添加型号</p></div>
+          <div class="old-block"><strong>接入参数</strong><p class="caption">协议、请求路径、目录地址、请求头</p></div>
+          <p class="note">已有同步填入能力，但编辑仍围绕三套配置展开，连接表单也混入了模型管理。</p>
+        </div></div>
+        <div class="panel"><div class="panel-title"><h3>编辑连接设置</h3><span class="tag">第二版</span></div><div class="body">
+          <form id="connection-form" novalidate>
+            <div class="stack">
+              <label class="field">名称<input id="provider-name" value="我的供应商" maxlength="120"></label>
+              <label class="field">服务地址<input id="public-url" value="https://api.example.com" spellcheck="false" aria-describedby="public-url-error"></label>
+              <p id="public-url-error" class="error" hidden></p>
+              <div class="field">API key<div class="row"><span id="key-label">已保存 · 示例 A</span><button type="button" id="rotate">模拟更换</button></div></div>
+            </div>
+            <details id="engine-details"><summary>不同引擎使用不同连接<small id="engine-summary">Codex 使用单独地址</small></summary><div id="engines" class="detail-body"></div></details>
+            <details><summary>高级连接设置<small>协议、请求路径、目录地址与请求头</small></summary><div class="detail-body"><p class="caption">本预览仅说明参数归属。实际设置按引擎组织；有自定义时显示具体摘要，发生连接错误时直接展示问题和处理入口。</p><div class="pills"><span>协议</span><span>请求路径</span><span>目录地址</span><span>请求头</span></div></div></details>
+            <p id="connection-error" class="error" role="status" hidden></p>
+            <div id="impact" class="impact" hidden></div>
+            <div class="footer"><button type="button" id="reset-connection">取消修改</button><button class="primary" type="submit">保存示例</button></div>
+            <p class="status" id="connection-status" aria-live="polite"></p>
+          </form>
+        </div></div>
+      </div>
+      <p class="note">此处演示已经统一的连接。旧配置保持独立，用户主动统一后才建立关联；单独地址换到其他域名时，不自动携带原 Key。</p>
+    </section>
+
+    <section id="models">
+      <div class="section-head"><div><div class="eyebrow">03 / 默认给出可选模型</div><h2>先选目录，找不到再手填。</h2></div><p>添加入口放在模型列表旁。打开后直接看到搜索和型号，不先让用户选择两套流程。</p></div>
+      <div class="compare">
+        <div>
+          <div class="path-item"><h3>目录作为主路径</h3><p>支持搜索、勾选与已添加标记。搜索无结果时，手动入口仍然可见。</p></div>
+          <div class="path-item"><h3>手动添加只问必要信息</h3><p>先填型号 ID，名称可选。只有自动判断不足、且影响使用时，才继续询问类型或接入方式。</p></div>
+          <p class="note">API 连接有写入能力才显示此入口。目录失败不等于账号失效，也不应阻止手动添加。</p>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><div><h3 id="provider-title">我的供应商</h3><p class="caption">API 接入 · 已配置，未验证</p></div><details class="more" id="provider-menu"><summary aria-label="供应商更多操作">⋯</summary><button id="edit-link">编辑连接设置</button></details></div>
+          <div class="body"><div class="row"><h3>模型</h3><button class="primary" id="open-add">＋ 添加模型</button></div>
+            <div id="model-list">
+              <div class="model-row"><div><strong>示例模型 A</strong><p>模型容量约 1.05M · 演示数据</p></div><button id="model-detail">详情</button></div>
+              <div class="model-row"><div><strong>示例模型 B</strong><p>对话模型</p></div><span class="caption">已显示</span></div>
+            </div>
+            <p id="model-status" class="status" aria-live="polite"></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="context">
+      <div class="section-head"><div><div class="eyebrow">04 / 先看懂，再调整</div><h2>默认显示摘要，不急着让人填数字。</h2></div><p>自动表示跟随当前默认。需要自己指定时，再展开输入；恢复自动也需要保存，取消不会改变原设置。</p></div>
+      <div class="compare">
+        <div class="panel"><div class="panel-title"><h3>原方式</h3></div><div class="body"><div class="row"><span>上下文上限</span><div class="ghost-field">1000 K</div></div><p class="note">用户需要先换算单位，还容易把默认使用上限误认为模型最大容量。</p><div class="kv"><span>第二版的区分</span><strong>使用多少 / 最多支持多少</strong></div><p class="note">默认值为什么较小，应按真实策略解释，不能无依据地承诺更快或更省钱。示例中的数值不对应任何实际型号。</p></div></div>
+        <div class="panel"><div class="panel-title"><h3>示例模型 A · 上下文</h3><span class="tag">可操作</span></div><div class="body">
+          <div class="row"><div><p class="caption">使用上限</p><p id="context-value" class="context-value">自动 · 200,000 tokens</p></div><button id="adjust-context" aria-expanded="false" aria-controls="context-editor">调整</button></div>
+          <div class="kv"><span>模型最大容量</span><strong>1,050,000 tokens</strong></div>
+          <p id="context-note" class="note">自动跟随当前默认使用上限。</p>
+          <form id="context-editor" class="editor" hidden novalidate>
+            <label class="field">使用方式<select id="context-mode"><option value="default">自动 · 跟随默认</option><option value="custom">自定义</option></select></label>
+            <div id="custom-context" class="stack" style="margin-top:14px" hidden>
+              <label class="field">自定义上限<input id="context-input" value="200000" maxlength="96" aria-describedby="parsed" autocomplete="off" spellcheck="false"></label>
+              <div class="pills"><button type="button" data-value="1M">试填 1M</button><button type="button" data-value="100万">试填 100万</button><button type="button" data-value="1048576">试填 1048576</button></div>
+            </div>
+            <p class="readout" id="parsed" aria-live="polite"></p>
+            <p class="note">提高数值不会扩展模型能力；实际生效还受当前任务和引擎限制。本预览演示格式换算，不验证真实接入能力。</p>
+            <div class="footer"><button type="button" id="cancel-context">取消</button><button class="primary" id="save-context">保存示例</button></div>
+          </form>
+          <p class="status" id="context-status" aria-live="polite"></p>
+          <details><summary>高级设置<small>自动压缩、接口选择与其他模型覆盖</small></summary><p class="note">实际配置规则不因输入方式变化而改变。有自定义时点名提示；资料未知时明确显示未知，不用型号名称猜测。</p></details>
+        </div></div>
+      </div>
+    </section>
+
+    <section id="selection">
+      <div class="section-head"><div><div class="eyebrow">05 / 保留清晰的选中位置</div><h2>背景柔和，状态仍然明确。</h2></div><p>选中、悬停与键盘焦点分别表达。右上角可以切换深浅色；标题、副标题同步配对调整。</p></div>
+      <div class="compare">
+        <div class="panel"><div class="panel-title"><h3>原效果方向</h3><span class="tag">反馈示意</span></div><div class="body task-list"><div class="task">整理今天的想法<small>刚刚更新</small></div><div class="task old-active">供应商设置改版<small>当前任务 · 阅读方案</small></div><div class="task">检查项目进度<small>昨天</small></div></div></div>
+        <div class="panel"><div class="panel-title"><h3>改版方向</h3><span class="tag">可点击切换</span></div><div class="body task-list" id="task-list"><button class="task" aria-pressed="false">整理今天的想法<small>刚刚更新</small></button><button class="task active" aria-pressed="true">供应商设置改版<small>当前任务 · 阅读方案</small></button><button class="task" aria-pressed="false">检查项目进度<small>昨天</small></button></div></div>
+      </div>
+      <p class="note">不是原帖截图复刻或最终主题定稿。后续在真实任务行的未读、运行、更多操作与其他主题下核验。</p>
+    </section>
+    <div class="end">建议先交付视觉、上下文与表单分层，再调整模型入口；公共连接关联在凭证作用域和旧配置兼容明确后上线。<br>这份预览刷新后还原，所有示例修改均不影响应用。</div>
+  </main>
+
+  <dialog id="add-dialog" aria-labelledby="add-title">
+    <div class="dialog-frame">
+      <div class="dialog-header"><h2 id="add-title">添加模型</h2><p class="caption" id="add-provider-name">我的供应商 · 示例目录</p></div>
+      <div class="dialog-body">
+        <div id="catalog-pane">
+          <label class="field">搜索模型<input id="catalog-search" type="search" placeholder="输入型号或名称" autocomplete="off"></label>
+          <div id="catalog-list" class="catalog"></div>
+          <p id="catalog-empty" class="note" hidden>没有匹配的型号，可以手动添加。</p>
+          <p id="catalog-count" class="status" aria-live="polite"></p>
+          <div class="row manual-entry"><span class="caption">找不到型号？</span><button id="manual-entry">手动添加型号</button></div>
+        </div>
+        <div id="manual-pane" class="stack" hidden>
+          <button id="back-catalog">返回目录</button>
+          <label class="field">型号 ID<input id="manual-id" placeholder="例如 my-model" autocomplete="off" maxlength="120" aria-describedby="add-error"></label>
+          <label class="field">显示名称（可选）<input id="manual-name" autocomplete="off" maxlength="120"></label>
+          <p class="caption">留空时使用型号 ID。本页手动示例按对话模型演示；正式产品仅在无法确定接入方式时继续询问。</p>
+        </div>
+      </div>
+      <div class="dialog-footer"><p id="add-error" class="error" role="status"></p><div class="footer"><button id="cancel-add">取消</button><button class="primary" id="confirm-add">添加到示例列表</button></div></div>
+    </div>
+  </dialog>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let dark = matchMedia('(prefers-color-scheme:dark)').matches;
+    function paintTheme() {
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      $('theme').textContent = dark ? '切换浅色' : '切换深色';
+    }
+    paintTheme();
+    $('theme').onclick = () => { dark = !dark; paintTheme(); };
+
+    const names = ['Claude Code', 'Codex', 'Pi'];
+    let keyVersion = 0;
+    let savedConnection;
+    let connectionProblems = [];
+    names.forEach((name, i) => {
+      const box = document.createElement('div');
+      box.className = 'engine';
+      // Static labels only; user-entered values are rendered through textContent.
+      box.innerHTML = `<strong>${name}</strong>
+        <label class="toggle"><input id="route-${i}" type="checkbox" aria-label="${name}使用单独地址">使用单独地址</label>
+        <input id="own-${i}" aria-label="${name}独立服务地址" value="https://api.example.com/codex" aria-describedby="error-${i}" hidden>
+        <label class="toggle"><input id="key-${i}" type="checkbox" aria-label="${name}使用单独 API key">使用单独 API key（示例）</label>
+        <p id="effective-${i}" class="caption"></p><p id="error-${i}" class="error" hidden></p>`;
+      $('engines').append(box);
+      $('route-' + i).onchange = updateConnection;
+      $('own-' + i).oninput = updateConnection;
+      $('key-' + i).onchange = updateConnection;
+    });
+    $('route-1').checked = true;
+    function captureConnection() {
+      return { url: $('public-url').value, name: $('provider-name').value, key: keyVersion,
+        engines: names.map((_, i) => ({ own: $('route-' + i).checked,
+          url: $('own-' + i).value, key: $('key-' + i).checked })) };
+    }
+    function parseAddress(value) {
+      try {
+        const url = new URL(value);
+        return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? url : null;
+      } catch { return null; }
+    }
+    function updateConnection() {
+      connectionProblems = [];
+      const address = parseAddress($('public-url').value);
+      $('public-url-error').hidden = !!address;
+      $('public-url-error').textContent = '请填写不含账号密码的 HTTP(S) 服务地址。';
+      $('public-url').setAttribute('aria-invalid', String(!address));
+      if (!address) connectionProblems.push({ field: 'public-url', message: '服务地址格式无效。' });
+      const exceptions = [];
+      names.forEach((name, i) => {
+        const own = $('route-' + i).checked, ownKey = $('key-' + i).checked;
+        $('own-' + i).hidden = !own;
+        const effective = own ? $('own-' + i).value : $('public-url').value;
+        const target = parseAddress(effective);
+        let error = '';
+        if (own && !target) error = name + ' 的单独地址格式无效。';
+        else if (address && target && target.origin !== address.origin && !ownKey)
+          error = name + ' 指向不同域名，请选择该地址对应的 API key；本页可勾选独立示例凭证。';
+        $('own-' + i).setAttribute('aria-invalid', String(!!error));
+        $('error-' + i).hidden = !error;
+        $('error-' + i).textContent = error;
+        if (error) connectionProblems.push({ field: 'own-' + i, message: error });
+        if (own || ownKey) exceptions.push(name + ' 使用单独' + (own && ownKey ? '地址和 Key' : own ? '地址' : ' Key'));
+        $('effective-' + i).textContent = (own ? effective : '使用上面的服务地址') + ' · ' +
+          (ownKey ? '独立示例凭证' : '使用上面的 Key（示例 ' + String.fromCharCode(65 + keyVersion) + '）');
+      });
+      $('engine-summary').textContent = exceptions.join('；') || '都使用上面的连接';
+      $('key-label').textContent = '示例 ' + String.fromCharCode(65 + keyVersion) +
+        (savedConnection && savedConnection.key !== keyVersion ? ' · 待保存' : ' · 已保存');
+      $('connection-error').hidden = !connectionProblems.length;
+      $('connection-error').textContent = connectionProblems.map(p => p.message).join(' ');
+      const changes = [];
+      if (savedConnection && savedConnection.key !== keyVersion) {
+        const targets = names.filter((_, i) => !$('key-' + i).checked);
+        changes.push(targets.length ? '将更新 ' + targets.join('、') + ' 使用的 Key。' : '已设置单独 Key 的引擎保持不变。');
+      }
+      if (savedConnection && savedConnection.url !== $('public-url').value) {
+        const targets = names.filter((_, i) => !$('route-' + i).checked);
+        changes.push(targets.length ? '将更新 ' + targets.join('、') + ' 使用的地址；单独地址保持不变。' : '单独设置的地址保持不变。');
+      }
+      $('impact').hidden = !changes.length;
+      $('impact').textContent = changes.join(' ');
+      $('connection-status').textContent = '';
+    }
+    $('public-url').oninput = updateConnection;
+    $('provider-name').oninput = () => { $('connection-status').textContent = ''; };
+    $('rotate').onclick = () => { keyVersion = (keyVersion + 1) % 26; updateConnection(); };
+    $('connection-form').onsubmit = (event) => {
+      event.preventDefault(); updateConnection();
+      if (connectionProblems.length) {
+        const { field } = connectionProblems[0];
+        if (field !== 'public-url') $('engine-details').open = true;
+        $(field).focus(); return;
+      }
+      savedConnection = captureConnection(); updateConnection();
+      $('provider-title').textContent = savedConnection.name || '我的供应商';
+      $('connection-status').textContent = '示例已保存，真实连接未改变。';
+    };
+    $('reset-connection').onclick = () => {
+      const saved = savedConnection;
+      $('public-url').value = saved.url; $('provider-name').value = saved.name; keyVersion = saved.key;
+      saved.engines.forEach((e, i) => { $('route-' + i).checked = e.own; $('own-' + i).value = e.url; $('key-' + i).checked = e.key; });
+      updateConnection(); $('connection-status').textContent = '已还原本次未保存的修改。';
+    };
+    savedConnection = captureConnection(); updateConnection();
+    $('edit-link').onclick = () => {
+      $('provider-menu').open = false; $('connection').scrollIntoView(); $('provider-name').focus({ preventScroll: true });
+    };
+    $('model-detail').onclick = () => { $('context').scrollIntoView(); $('adjust-context').focus({ preventScroll: true }); };
+
+    const catalog = [
+      { id: 'example-a', name: '示例模型 A', type: '对话' },
+      { id: 'example-b', name: '示例模型 B', type: '对话' },
+      { id: 'example-c', name: '示例模型 C', type: '对话' },
+      { id: 'example-speech', name: '示例语音模型', type: '语音合成' }
+    ];
+    const added = new Set(['example-a', 'example-b']);
+    const selected = new Set();
+    let addMode = 'catalog';
+    function renderCatalog() {
+      const query = $('catalog-search').value.trim().toLowerCase();
+      const visible = catalog.filter(m => (m.id + ' ' + m.name + ' ' + m.type).toLowerCase().includes(query));
+      $('catalog-list').replaceChildren();
+      visible.forEach(model => {
+        const label = document.createElement('label'); label.className = 'checkrow';
+        const box = document.createElement('input'); box.type = 'checkbox'; box.value = model.id;
+        box.checked = added.has(model.id) || selected.has(model.id); box.disabled = added.has(model.id);
+        const text = document.createElement('span'), detail = document.createElement('small');
+        text.append(document.createTextNode(model.name));
+        detail.textContent = model.id + ' · ' + model.type + (box.disabled ? ' · 已添加' : ''); text.append(detail);
+        box.onchange = () => { box.checked ? selected.add(model.id) : selected.delete(model.id); updateCount(); };
+        label.append(box, text); $('catalog-list').append(label);
+      });
+      $('catalog-empty').hidden = visible.length > 0;
+      updateCount();
+    }
+    function updateCount() { $('catalog-count').textContent = selected.size ? '已选 ' + selected.size + ' 个型号（含搜索范围外的选择）' : ''; }
+    function changeAddMode(mode) {
+      addMode = mode; $('catalog-pane').hidden = mode !== 'catalog'; $('manual-pane').hidden = mode !== 'manual';
+      $('add-title').textContent = mode === 'catalog' ? '添加模型' : '手动添加型号';
+      $('add-error').textContent = ''; $('manual-id').removeAttribute('aria-invalid');
+    }
+    $('open-add').onclick = () => {
+      selected.clear(); $('catalog-search').value = ''; $('manual-id').value = ''; $('manual-name').value = '';
+      changeAddMode('catalog'); renderCatalog();
+      $('add-provider-name').textContent = $('provider-title').textContent + ' · 示例目录';
+      $('add-dialog').showModal(); $('catalog-search').focus();
+    };
+    $('catalog-search').oninput = renderCatalog;
+    $('manual-entry').onclick = () => { changeAddMode('manual'); $('manual-id').focus(); };
+    $('back-catalog').onclick = () => { changeAddMode('catalog'); renderCatalog(); $('catalog-search').focus(); };
+    $('cancel-add').onclick = () => $('add-dialog').close();
+    $('add-dialog').addEventListener('close', () => { selected.clear(); $('open-add').focus({ preventScroll: true }); });
+    $('confirm-add').onclick = () => {
+      const items = addMode === 'catalog' ? catalog.filter(m => selected.has(m.id)) :
+        [{ id: $('manual-id').value.trim(), name: $('manual-name').value.trim() || $('manual-id').value.trim(), type: '对话（手动示例）' }];
+      let error = '';
+      if (!items.length || items.some(m => !m.id)) error = addMode === 'catalog' ? '请选择要添加的型号。' : '请填写型号 ID。';
+      else if (items.some(m => added.has(m.id))) error = '该型号已添加，请填写其他型号 ID。';
+      if (error) {
+        $('add-error').textContent = error;
+        if (addMode === 'manual') { $('manual-id').setAttribute('aria-invalid', 'true'); $('manual-id').focus(); }
+        return;
+      }
+      items.forEach(model => {
+        added.add(model.id);
+        const row = document.createElement('div'); row.className = 'model-row';
+        const info = document.createElement('div'), title = document.createElement('strong'), p = document.createElement('p'), badge = document.createElement('span');
+        title.textContent = model.name; p.textContent = model.id + ' · ' + model.type;
+        badge.className = 'caption'; badge.textContent = '已显示'; info.append(title, p); row.append(info, badge); $('model-list').append(row);
+      });
+      $('model-status').textContent = '已向示例列表添加 ' + items.length + ' 个型号，原有型号保留。';
+      $('add-dialog').close(); $('model-list').lastElementChild.scrollIntoView({ block: 'nearest' });
+    };
+
+    function parseTokens(value) {
+      if (value.length > 96) return null;
+      const match = value.trim().match(/^((?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?)\s*([kKmM万]?)$/);
+      if (!match) return null;
+      const parts = match[1].replaceAll(',', '').split('.');
+      const scale = { '': 1n, k: 1000n, m: 1000000n, '万': 10000n }[match[2].toLowerCase()];
+      const divisor = 10n ** BigInt((parts[1] || '').length), number = BigInt(parts.join('')) * scale;
+      if (number % divisor !== 0n || number <= 0n || number / divisor > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+      return Number(number / divisor);
+    }
+    let contextSaved = { mode: 'default', tokens: 200000 };
+    function updateContextDraft() {
+      const custom = $('context-mode').value === 'custom'; $('custom-context').hidden = !custom;
+      const value = custom ? parseTokens($('context-input').value) : 200000;
+      $('parsed').textContent = value === null ? '请输入正整数 token 数，或 1M、100万等有效写法。' :
+        '= ' + value.toLocaleString('en-US') + ' tokens' + (custom ? ' · 精确换算' : ' · 保存后跟随默认');
+      $('parsed').classList.toggle('error', value === null);
+      $('context-input').setAttribute('aria-invalid', String(value === null));
+      return value;
+    }
+    function closeContextEditor() {
+      $('context-editor').hidden = true; $('adjust-context').setAttribute('aria-expanded', 'false');
+      $('adjust-context').focus({ preventScroll: true });
+    }
+    $('adjust-context').onclick = () => {
+      if (!$('context-editor').hidden) { $('context-mode').focus(); return; }
+      $('context-mode').value = contextSaved.mode; $('context-input').value = String(contextSaved.tokens);
+      $('context-editor').hidden = false; $('adjust-context').setAttribute('aria-expanded', 'true');
+      $('context-status').textContent = ''; updateContextDraft(); $('context-mode').focus();
+    };
+    $('context-mode').onchange = updateContextDraft; $('context-input').oninput = updateContextDraft;
+    document.querySelectorAll('[data-value]').forEach(button => button.onclick = () => { $('context-input').value = button.dataset.value; updateContextDraft(); });
+    $('cancel-context').onclick = closeContextEditor;
+    $('context-editor').onkeydown = (event) => { if (event.key === 'Escape') { event.preventDefault(); closeContextEditor(); } };
+    $('context-editor').onsubmit = (event) => {
+      event.preventDefault(); const tokens = updateContextDraft();
+      if (tokens === null) { $('context-input').focus(); return; }
+      contextSaved = { mode: $('context-mode').value, tokens };
+      $('context-value').textContent = (contextSaved.mode === 'default' ? '自动' : '自定义') + ' · ' + tokens.toLocaleString('en-US') + ' tokens';
+      $('context-note').textContent = contextSaved.mode === 'default' ? '自动跟随当前默认使用上限。' : '已自定义使用上限；调整为自动并保存后，将重新跟随默认。';
+      closeContextEditor(); $('context-status').textContent = '已保存到本页示例，真实任务未改变。';
+    };
+    $('task-list').querySelectorAll('button').forEach(button => button.onclick = () => {
+      $('task-list').querySelectorAll('button').forEach(item => { item.classList.toggle('active', item === button); item.setAttribute('aria-pressed', String(item === button)); });
+    });
+  </script>
+</body>
+</html>
