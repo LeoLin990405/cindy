@@ -490,6 +490,57 @@ describe('dual scheme (cindy primary + legacy xdt-maker)', () => {
     expect(parseDeepLink(`${valid}&data=duplicate`)).toBeNull();
   });
 
+  // 测试价值
+  // - 生产入口与可观察结果：handleIncomingDeepLink。超限链接不抛错、不进入 pending；
+  //   warn 带实际体积、上限和省略 models 的引导，且不含链接原文或 API Key。
+  // - Bug／规则依据：issue #7760。深链入口必须把 ProviderImportSizeLimitError 记成结构化 warn。
+  // - 现有覆盖缺口：providerImport.test.ts 只断言 createProviderImportDraftFromRest 抛错，
+  //   删掉 deepLink.ts 的 log.warn 那些用例仍会通过。
+  // - 最小失败输入：带测试 Key、models 多到 base64 后超过 32 KB URL 上限的 cindy://provider/import。
+  // - tier：unit。logger 与 Electron 均在本文件进程内 mock，无网络。
+  // - 实测耗时：pnpm --dir apps/desktop exec vitest run src/main/__tests__/deepLink.test.ts 约 1.7s。
+  it('logs an over-limit provider import with sizes and the models hint, without the link or key', () => {
+    setDeepLinkMainWindow(null);
+    takePendingDeepLink();
+    for (const level of Object.values(logs)) level.mockClear();
+
+    const apiKey = 'sk-overlimit-must-not-log';
+    const payload = {
+      kind: 'custom',
+      name: 'Over Limit Import',
+      auth: { method: 'apiKey', apiKey },
+      endpoints: [
+        {
+          protocol: 'openai-chat',
+          baseUrl: 'https://api.acme.test/v1',
+          models: Array.from({ length: 250 }, (_, index) => ({
+            id: `acme-model-${index}`,
+            name: `Acme Model ${index} ${'x'.repeat(120)}`,
+          })),
+        },
+      ],
+    };
+    const data = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+    const link = `cindy://provider/import?v=1&data=${data}`;
+
+    expect(() => handleIncomingDeepLink(link, 'open-url')).not.toThrow();
+    expect(takePendingDeepLink()).toBeNull();
+
+    const sizeWarn = logs.warn.mock.calls.find(
+      (call) => call[0] === 'provider import link rejected: exceeds size limit',
+    );
+    expect(sizeWarn?.[1]).toMatchObject({
+      scope: 'url',
+      limitBytes: 32 * 1024,
+      hint: 'omit the models field; Cindy discovers models automatically after import',
+    });
+    expect(sizeWarn?.[1].actualBytes).toBeGreaterThan(32 * 1024);
+
+    const serialized = JSON.stringify(Object.values(logs).map((level) => level.mock.calls));
+    expect(serialized).not.toContain(link);
+    expect(serialized).not.toContain(apiKey);
+  });
+
   it('generates all builders with the primary cindy:// scheme', () => {
     expect(DEEP_LINK_PROTOCOL).toBe('cindy');
     expect(buildSessionDeepLink('abc-123')).toBe('cindy://session/abc-123');
